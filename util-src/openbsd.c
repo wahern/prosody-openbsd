@@ -24,9 +24,9 @@
  * ======================================================================
  */
 #include <errno.h>  /* errno */
-#include <string.h> /* strerror(3) */
+#include <string.h> /* strerror(3) strlen(3) */
 
-#include <unistd.h> /* pledge(2) unveil(2) */
+#include <unistd.h> /* getcwd(3) pledge(2) unveil(2) */
 
 #include <sys/param.h>  /* MAXCOMLEN */
 #include <sys/ktrace.h> /* ktrace(2) utrace(2) */
@@ -84,6 +84,35 @@ static const struct {
 	C(KTR_USER_MAXLEN),
 };
 
+static int errnoresult(lua_State *L, int error)
+{
+	luaL_pushfail(L);
+	lua_pushstring(L, strerror(error));
+	lua_pushinteger(L, error);
+	return 3;
+}
+
+static int
+Lgetcwd(lua_State *L)
+{
+	/*
+	 * NB: being careful not to leak memory if pushing result throws:
+	 * using luaL_Buffer rather than letting getcwd(3) allocate and
+	 * return a buffer
+	 */
+	luaL_Buffer b;
+	luaL_buffinit(L, &b);
+
+	const char *path;
+	if (!(path = getcwd(luaL_prepbuffer(&b), LUAL_BUFFERSIZE))) {
+		return errnoresult(L, errno);
+	}
+
+	luaL_addsize(&b, strlen(path));
+	luaL_pushresult(&b);
+	return 1;
+}
+
 static int
 Lktrace(lua_State *L)
 {
@@ -93,11 +122,7 @@ Lktrace(lua_State *L)
 	pid_t pid = (pid_t)luaL_checkinteger(L, 4);
 
 	if (0 != ktrace(tracefile, ops, trpoints, pid)) {
-		int errnum = errno;
-		luaL_pushfail(L);
-		lua_pushstring(L, strerror(errnum));
-		lua_pushinteger(L, errnum);
-		return 3;
+		return errnoresult(L, errno);
 	}
 
 	lua_pushboolean(L, 1);
@@ -111,11 +136,7 @@ Lpledge(lua_State *L)
 	const char *execpromises = luaL_optstring(L, 2, NULL);
 
 	if (0 != pledge(promises, execpromises)) {
-		int errnum = errno;
-		luaL_pushfail(L);
-		lua_pushstring(L, strerror(errnum));
-		lua_pushinteger(L, errnum);
-		return 3;
+		return errnoresult(L, errno);
 	}
 
 	lua_pushboolean(L, 1);
@@ -129,11 +150,7 @@ Lunveil(lua_State *L)
 	const char *permissions = luaL_optstring(L, 2, NULL);
 
 	if (0 != unveil(path, permissions)) {
-		int errnum = errno;
-		luaL_pushfail(L);
-		lua_pushstring(L, strerror(errnum));
-		lua_pushinteger(L, errnum);
-		return 3;
+		return errnoresult(L, errno);
 	}
 
 	lua_pushboolean(L, 1);
@@ -148,11 +165,7 @@ Lutrace(lua_State *L)
 	const char *record = luaL_optlstring(L, 2, NULL, &rlen);
 
 	if (0 != utrace(label, record, rlen)) {
-		int errnum = errno;
-		luaL_pushfail(L);
-		lua_pushstring(L, strerror(errnum));
-		lua_pushinteger(L, errnum);
-		return 3;
+		return errnoresult(L, errno);
 	}
 
 	lua_pushboolean(L, 1);
@@ -160,6 +173,7 @@ Lutrace(lua_State *L)
 }
 
 static const luaL_Reg exports[] = {
+	{ "getcwd", &Lgetcwd },
 	{ "ktrace", &Lktrace },
 	{ "pledge", &Lpledge },
 	{ "unveil", &Lunveil },

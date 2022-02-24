@@ -23,14 +23,39 @@
 -- SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 -- ======================================================================
 local configmanager = require"core.configmanager"
-local pathutil = require"util.paths"
 local openbsd = require"util.openbsd"
 
 module:set_global()
 
-local function resolve_path(path, dir)
-	dir = dir or prosody.paths.config or "."
-	return pathutil.resolve_relative_path(dir, path)
+-- abspath :: path:string [, basedir:string] -> string
+--
+-- Like realpath(3) but DOES NOT resolve symlinks--easier to trace input
+-- paths to configuration settings, and less likely to invite TOCTTOU races
+-- with false promises of symlink resolution.
+--
+local function abspath(path, basedir)
+	if not path:match"^/" then
+		basedir = basedir or prosody.paths.config or "."
+		if not basedir:match"^/" then
+			basedir = assert(openbsd.getcwd()) .. "/" .. basedir
+		end
+		path = basedir .. "/" .. path
+	end
+
+	-- build stack of path components as-if walking filesystem tree
+	local stack = {}
+	for component in path:gmatch"[^/]+" do
+		if component == "." then
+			-- leave last component on stack
+		elseif component == ".." then
+			assert(#stack > 0, path)
+			stack[#stack] = nil -- pop component
+		else
+			stack[#stack + 1] = component -- push component
+		end
+	end
+
+	return "/" .. table.concat(stack, "/")
 end
 
 -- Enumerate enabled hosts. See core/hostmanager.lua:load_enabled_hosts and
@@ -55,7 +80,7 @@ local function ssl_paths()
 			if type(v) ~= "string" then
 				return false
 			else
-				return resolve_path(v)
+				return abspath(v)
 			end
 		end
 
@@ -80,47 +105,331 @@ local function ssl_paths()
 	end)
 end
 
+local function xpwrap(f, msgh)
+	local function finishpcall(status, ...)
+		if not status then
+			return false, msgh(...)
+		else
+			return ...
+		end
+	end
+
+	return function (...)
+		return finishpcall(pcall(f, ...))
+	end
+end
+
+local orderedset = {}; do
+	orderedset.__index = orderedset
+
+	function orderedset.__call(self, _, previousindex)
+		local list = self:getlist()
+		local nextentry
+
+		if previousindex == nil then
+			nextentry = self.index[list[1]]
+		else
+			local previousentry = self.index[previousindex]
+			local nextindex = previousentry and list[previousentry.i + 1]
+			nextentry = nextindex and self.index[nextindex] or nil
+		end
+
+		if nextentry then
+			return nextentry.k, nextentry.v
+		end
+	end
+
+	function orderedset:getlist()
+		if self.dirty then
+			local list = {}
+			local n = 0
+
+			for k in pairs(self.index) do
+				n = n + 1
+				list[n] = k
+			end
+
+			table.sort(list, function (a, b)
+				a = self.index[a]
+				b = self.index[b]
+
+				if a.r == b.r then
+					return a.n < b.n
+				else
+					return a.r < b.r
+				end
+			end)
+
+			for i, k in ipairs(list) do
+				self.index[k].i = i
+			end
+
+			self.dirty = false
+			self.list = list
+		end
+
+		return self.list
+	end
+
+	function orderedset:getcounter()
+		local counter = self.counter
+		self.counter = counter + 1
+		return counter
+	end
+
+	function orderedset:add(k, v, rank)
+		local entry = self.index[k]
+		if not entry then
+			entry = {
+				k = k,
+				v = v,
+				r = rank or 0,
+				n = self:getcounter(),
+			}
+			self.index[k] = entry
+			self.dirty = true
+		end
+
+		return self
+	end
+
+	function orderedset:delete(k)
+		self.index[k] = nil
+		self.dirty = true
+
+		return self
+	end
+
+	function orderedset:exists(k)
+		local entry = self.index[k]
+		if entry then
+			return true, entry.v
+		else
+			return false
+		end
+	end
+
+	function orderedset.new()
+		local self = {
+			counter = 1,
+			dirty = false,
+			index = {},
+			list = {},
+		}
+		return setmetatable(self, orderedset)
+	end
+end
+
+local pathlist = {}; do
+	pathlist.__index = pathlist
+
+	function pathlist.__call(self, _, previousindex)
+		return self.inner(_, previousindex)
+	end
+
+	function pathlist:add(path, permissions)
+		path = abspath(path)
+		permissions = permissions or "r"
+
+		local exists, previouspermissions = self.inner:exists(path)
+		if not exists then
+			return self.inner:add(path, permissions)
+		elseif permissions ~= previouspermissions then
+			return nil, string.format("duplicate unveil path %q with mismatched permissions (%q ~= %q)", path, permissions, previouspermissions)
+		else
+			return self -- simple duplicate
+		end
+	end
+
+	function pathlist:addline(l)
+		local permissions, path = l:match"^[ \t]*([rwxc]+)[ \t]+(.+)$"
+		if permissions and path then
+			return self:add(path, permissions)
+		end
+
+		return nil, string.format("malformed unveil line directive %q", l)
+	end
+
+	function pathlist:addlines(s)
+		for l in s:gmatch"[^\n]+" do
+			if l:match"[^%s]" then
+				local ok, err = self:addline(l)
+				if not ok then
+					return nil, err
+				end
+			end
+		end
+
+		return self
+	end
+
+	function pathlist:additem(item)
+		local err
+
+		if type(item) == "string" then
+			return self:addlines(item)
+		elseif type(item) == "table" then
+			local path = item.path or item[1]
+			local permissions = item.permissions or item[2]
+
+			if type(path) == "string" then
+				return self:add(path, permissions)
+			end
+
+			err = string.format("unveil item missing path")
+		else
+			err = string.format("bad unveil item type (string or table expected, got %s)", type(item))
+		end
+
+		return nil, err or "?"
+	end
+
+	function pathlist:additems(t)
+		for _, item in ipairs(t) do
+			local ok, err = self:additem(item)
+
+			if not ok then
+				return nil, err or "?"
+			end
+		end
+
+		return self
+	end
+
+	function pathlist.new()
+		local self = {
+			inner = orderedset.new(),
+		}
+		return setmetatable(self, pathlist)
+	end
+end
+
+local promiselist = {}; do
+	promiselist.__index = promiselist
+
+	function promiselist.__call(self, _, previousindex)
+		return self.inner(_, previousindex)
+	end
+
+	function promiselist:add1(promise)
+		return self.inner:add(promise)
+	end
+
+	function promiselist:add(s)
+		for promise in s:gmatch"[^%s]+" do
+			local ok, err = self:add1(promise)
+			if not ok then
+				return nil, err or "?"
+			end
+		end
+
+		return self
+	end
+
+	function promiselist.new()
+		local self = {
+			inner = orderedset.new(),
+		}
+		return setmetatable(self, promiselist)
+	end
+end
+
+local _UNVEIL_INIT = {
+	{ path = assert(prosody.paths.config), permissions = "r" },
+	{ path = assert(prosody.paths.source), permissions = "r" },
+	{ path = assert(prosody.paths.data), permissions = "rwc" },
+	{ path = "/etc/ssl/cert.pem", permissions = "r" },
+}
+
 -- The flock and proc pledges are required initially for mod_posix
 -- daemonization (presuming we're loaded early enough), then we can drop.
 -- NB: Unlike unveil, subsequent pledges cannot expand capabilities.
 local _PROMISES_SEAL = "stdio rpath wpath cpath inet dns"
 local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc"
 
-local function init_sandbox()
-	local paths = {
-		{ assert(CFG_CONFIGDIR), "r" },
-		{ assert(CFG_SOURCEDIR), "r" },
-		{ assert(CFG_DATADIR), "rwc" },
-		{ "/etc/ssl/cert.pem", "r" },
-	}
+local unveil_enabled = module:get_option("unveil", true)
+local pledge_enabled = module:get_option("pledge", true)
+
+local function init_unveil()
+	local paths = assert(pathlist.new():additems(_UNVEIL_INIT))
 
 	for path in ssl_paths() do
-		paths[#paths + 1] = { path, "r" }
+		assert(paths:add(path, "r"))
 	end
 
-	for _, p in ipairs(paths) do
-		local path = assert(p[1], "no path specified")
-		local perms = assert(p[2], "no permissions specified for " .. path)
-		module:log("info", "unveiling %s (%s)", path, perms)
-		assert(openbsd.unveil(path, perms))
+	local unveil_type = type(unveil_enabled)
+	if unveil_type == "string" then
+		assert(paths:addlines(unveil_enabled))
+	elseif unveil_type == "table" then
+		assert(paths:additems(unveil_enabled))
+	elseif unveil_type ~= "boolean" then
+		error(string.format("bad unveil_enabled type (string or table expected, got %s)", unveil_type))
+	end
+
+	for path, permissions in paths do
+		module:log("info", "unveiling %s (%s)", path, permissions)
+		assert(openbsd.unveil(path, permissions))
 	end
 
 	-- Seal paths early as one of our main concerns is modules
 	-- potentially loading untrusted code, e.g. from /var/prosody.
 	assert(openbsd.unveil())
 	module:log("info", "unveil sealed")
-
-	module:log("info", "pledging %s", _PROMISES_INIT)
-	assert(openbsd.pledge(_PROMISES_INIT))
 end
 
-local function seal_sandbox()
-	module:log("info", "pledging %s", _PROMISES_SEAL)
-	assert(openbsd.pledge(_PROMISES_SEAL))
+local function init_pledge()
+	local promises = promiselist.new()
+
+	promises:add(_PROMISES_INIT)
+
+	if type(pledge_enabled) == "string" then
+		promises:add(pledge_enabled)
+	end
+
+	local s = table.concat(promises.inner:getlist(), " ")
+	module:log("info", "pledging %s", s)
+	assert(openbsd.pledge(s))
+end
+
+local function seal_pledge()
+	local promises = promiselist.new()
+
+	promises:add(_PROMISES_SEAL)
+
+	if type(pledge_enabled) == "string" then
+		promises:add(pledge_enabled)
+	end
+
+	local s = table.concat(promises.inner:getlist(), " ")
+	module:log("info", "pledging %s", s)
+	assert(openbsd.pledge(s))
 
 	assert(openbsd.pledge())
 	module:log("info", "pledge sealed")
 end
+
+local function on_error(err)
+	module:log("error", "%s", tostring(err))
+
+	-- bail on load error rather than leave process unguarded
+	os.exit(1)
+end
+
+local init_sandbox = xpwrap(function ()
+	if unveil_enabled then
+		init_unveil()
+	end
+
+	if pledge_enabled then
+		init_pledge()
+	end
+end, on_error)
+
+local seal_sandbox = xpwrap(function()
+	if pledge_enabled then
+		seal_pledge()
+	end
+end, on_error)
 
 init_sandbox()
 module:hook_global("server-started", seal_sandbox, -99)
