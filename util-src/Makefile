@@ -34,12 +34,14 @@ openbsd.so: openbsd.c Makefile
 .PHONY: all
 all: openbsd.so
 
-$(DESTDIR)$(pkglibdir)/util/openbsd.so: openbsd.so
+T.openbsd.so = $(utildir)/openbsd.so
+
+$(DESTDIR)$(T.openbsd.so): openbsd.so
 	mkdir -p $(@D)
 	cp -p openbsd.so $@
 
 .PHONY: install
-install: $(DESTDIR)$(pkglibdir)/util/openbsd.so
+install: $(DESTDIR)$(T.openbsd.so)
 
 .PHONY: clean
 clean:
