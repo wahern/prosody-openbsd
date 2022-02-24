@@ -1,6 +1,6 @@
 include common.mk
 
-SUBDIRS = plugins util-src
+SUBDIRS = plugins util-src etc
 
 .DEFAULT_GOAL = all     # GNU default goal
 .MAIN: $(.DEFAULT_GOAL) # OpenBSD default goal
