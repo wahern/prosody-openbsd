@@ -119,10 +119,10 @@ local function xpwrap(f, msgh)
 	end
 end
 
-local orderedset = {}; do
-	orderedset.__index = orderedset
+local orderedmap = {}; do
+	orderedmap.__index = orderedmap
 
-	function orderedset.__call(self, _, previousindex)
+	function orderedmap.__call(self, _, previousindex)
 		local list = self:getlist()
 		local nextentry
 
@@ -139,7 +139,7 @@ local orderedset = {}; do
 		end
 	end
 
-	function orderedset:getlist()
+	function orderedmap:getlist()
 		if self.dirty then
 			local list = {}
 			local n = 0
@@ -171,13 +171,13 @@ local orderedset = {}; do
 		return self.list
 	end
 
-	function orderedset:getcounter()
+	function orderedmap:getcounter()
 		local counter = self.counter
 		self.counter = counter + 1
 		return counter
 	end
 
-	function orderedset:add(k, v, rank)
+	function orderedmap:add(k, v, rank)
 		local entry = self.index[k]
 		if not entry then
 			entry = {
@@ -193,14 +193,14 @@ local orderedset = {}; do
 		return self
 	end
 
-	function orderedset:delete(k)
+	function orderedmap:delete(k)
 		self.index[k] = nil
 		self.dirty = true
 
 		return self
 	end
 
-	function orderedset:exists(k)
+	function orderedmap:exists(k)
 		local entry = self.index[k]
 		if entry then
 			return true, entry.v
@@ -209,14 +209,14 @@ local orderedset = {}; do
 		end
 	end
 
-	function orderedset.new()
+	function orderedmap.new()
 		local self = {
 			counter = 1,
 			dirty = false,
 			index = {},
 			list = {},
 		}
-		return setmetatable(self, orderedset)
+		return setmetatable(self, orderedmap)
 	end
 end
 
@@ -298,7 +298,7 @@ local pathlist = {}; do
 
 	function pathlist.new()
 		local self = {
-			inner = orderedset.new(),
+			inner = orderedmap.new(),
 		}
 		return setmetatable(self, pathlist)
 	end
@@ -328,7 +328,7 @@ local promiselist = {}; do
 
 	function promiselist.new()
 		local self = {
-			inner = orderedset.new(),
+			inner = orderedmap.new(),
 		}
 		return setmetatable(self, promiselist)
 	end
