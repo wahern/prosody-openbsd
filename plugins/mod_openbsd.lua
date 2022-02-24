@@ -1,5 +1,5 @@
 -- =====================================================================
--- mod_openbsd.lua - Prosody OpenBSD sandboxing module
+-- mod_unveil.lua - Prosody OpenBSD sandboxing module
 -- ---------------------------------------------------------------------
 -- Copyright (c) 2022 William Ahern
 --

@@ -1,4 +1,4 @@
--- Ensure mod_openbsd is loaded as early as possible, preferably before any
+-- Ensure mod_unveil is loaded as early as possible, preferably before any
 -- other module, but after prosody.cfg.lua has been loaded. One of our
 -- primary threat vectors is modules potentially loading untrusted or
 -- malformed state and code from /var/prosody, as data under /var/prosody is
@@ -6,7 +6,7 @@
 -- possible before any module is loaded which may read data from
 -- /var/prosody. After all modules are loaded and initializations completed,
 -- we can further reduce capabilities and seal the sandbox--accomplished by
--- a server-started hook installed from mod_openbsd.
+-- a server-started hook installed from mod_unveil.
 --
 -- NOTES:
 --   * Modules are loaded in a roughly random order by iteration over a
@@ -21,5 +21,5 @@
 --     https://hg.prosody.im/trunk/file/469e4453ed01/util/events.lua#l39
 --
 prosody.events.add_handler("server-starting", function ()
-	require"core.modulemanager".load("*", "openbsd")
+	require"core.modulemanager".load("*", "unveil")
 end, 99)

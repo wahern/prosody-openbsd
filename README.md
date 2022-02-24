@@ -7,6 +7,9 @@
 [unveil(2)](https://man.openbsd.org/unveil.2) to minimize process capabilities
 and filesystem visibility.
 
+In the future prosody-openbsd may include additional modules, such as for
+native kqueue support, to improve OpenBSD system integration.
+
 ## Installation
 
 The Makefile and default compiler flags assume an OpenBSD build host, and
@@ -19,7 +22,7 @@ package.
 
 ## Configuration
 
-The module `mod_openbsd` *should* be loaded as early as possible to ensure
+The module `mod_unveil` *should* be loaded as early as possible to ensure
 the process is already sandboxed before any module begins loading state.
 Unfortunately, Prosody loads modules in mostly random order (by iterating a
 hash--not array--built from `modules_enabled` and other built-in lists).
