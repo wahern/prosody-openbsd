@@ -26,6 +26,8 @@ local configmanager = require"core.configmanager"
 local pathutil = require"util.paths"
 local openbsd = require"util.openbsd"
 
+module:set_global()
+
 local function resolve_path(path, dir)
 	dir = dir or prosody.paths.config or "."
 	return pathutil.resolve_relative_path(dir, path)
@@ -78,9 +80,13 @@ local function ssl_paths()
 	end)
 end
 
-module:set_global()
+-- The flock and proc pledges are required initially for mod_posix
+-- daemonization (presuming we're loaded early enough), then we can drop.
+-- NB: Unlike unveil, subsequent pledges cannot expand capabilities.
+local _PROMISES_SEAL = "stdio rpath wpath cpath inet dns"
+local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc"
 
-module:hook_global("server-started", function ()
+local function init_sandbox()
 	local paths = {
 		{ assert(CFG_CONFIGDIR), "r" },
 		{ assert(CFG_SOURCEDIR), "r" },
@@ -98,10 +104,23 @@ module:hook_global("server-started", function ()
 		module:log("info", "unveiling %s (%s)", path, perms)
 		assert(openbsd.unveil(path, perms))
 	end
-	assert(openbsd.unveil()) -- finalize paths
 
-	local promises = "stdio rpath wpath cpath inet dns"
-	module:log("info", "pledging %s", promises)
-	assert(openbsd.pledge(promises))
-	assert(openbsd.pledge()) -- finalize pledges
-end)
+	-- Seal paths early as one of our main concerns is modules
+	-- potentially loading untrusted code, e.g. from /var/prosody.
+	assert(openbsd.unveil())
+	module:log("info", "unveil sealed")
+
+	module:log("info", "pledging %s", _PROMISES_INIT)
+	assert(openbsd.pledge(_PROMISES_INIT))
+end
+
+local function seal_sandbox()
+	module:log("info", "pledging %s", _PROMISES_SEAL)
+	assert(openbsd.pledge(_PROMISES_SEAL))
+
+	assert(openbsd.pledge())
+	module:log("info", "pledge sealed")
+end
+
+init_sandbox()
+module:hook_global("server-started", seal_sandbox, -99)
