@@ -177,7 +177,7 @@ local orderedmap = {}; do
 		return counter
 	end
 
-	function orderedmap:add(k, v, rank)
+	function orderedmap:insert(k, v, rank)
 		local entry = self.index[k]
 		if not entry then
 			entry = {
@@ -188,9 +188,44 @@ local orderedmap = {}; do
 			}
 			self.index[k] = entry
 			self.dirty = true
+		elseif entry.v ~= v then
+			return nil, string.format("key %q exists with different value", k), entry.v, entry.r
+		elseif entry.r ~= (rank or entry.r) then
+			return nil, string.format("key %q exists with different rank", k), entry.v, entry.r
 		end
 
 		return self
+	end
+
+	local function update(self, entry, v, rank)
+		entry.v = v
+
+		local r0 = entry.r
+		local r1 = rank or r0
+		if r0 ~= r1 then
+			self.dirty = true
+		end
+		entry.r = r1
+
+		return self
+	end
+
+	function orderedmap:update(k, v, rank)
+		local entry = self.index[k]
+		if entry then
+			return update(self, entry, v, rank)
+		else
+			return nil, string.format("key %q does not exist", k)
+		end
+	end
+
+	function orderedmap:upsert(k, v, rank)
+		local entry = self.index[k]
+		if entry then
+			return update(self, entry, v, rank)
+		else
+			return self:insert(k, v, rank)
+		end
 	end
 
 	function orderedmap:delete(k)
@@ -203,7 +238,7 @@ local orderedmap = {}; do
 	function orderedmap:exists(k)
 		local entry = self.index[k]
 		if entry then
-			return true, entry.v
+			return true, entry.v, entry.r
 		else
 			return false
 		end
@@ -227,24 +262,29 @@ local pathlist = {}; do
 		return self.inner(_, previousindex)
 	end
 
+	local function selfresult(self, r, ...)
+		if r then return self, ... else return r, ... end
+	end
+
 	function pathlist:add(path, permissions)
 		path = abspath(path)
 		permissions = permissions or "r"
 
-		local exists, previouspermissions = self.inner:exists(path)
-		if not exists then
-			return self.inner:add(path, permissions)
-		elseif permissions ~= previouspermissions then
-			return nil, string.format("duplicate unveil path %q with mismatched permissions (%q ~= %q)", path, permissions, previouspermissions)
-		else
-			return self -- simple duplicate
-		end
+		return selfresult(self, self.inner:upsert(path, permissions))
+	end
+
+	function pathlist:delete(path)
+		return selfresult(self, self.inner:delete(abspath(path)))
 	end
 
 	function pathlist:addline(l)
-		local permissions, path = l:match"^[ \t]*([rwxc]+)[ \t]+(.+)$"
+		local permissions, path = l:match"^[ \t]*([-rwxc]+)[ \t]+(.+)$"
 		if permissions and path then
-			return self:add(path, permissions)
+			if permissions == "-" then
+				return self:delete(path)
+			else
+				return self:add(path, permissions)
+			end
 		end
 
 		return nil, string.format("malformed unveil line directive %q", l)
@@ -311,13 +351,27 @@ local promiselist = {}; do
 		return self.inner(_, previousindex)
 	end
 
+	local function selfresult(self, r, ...)
+		if r then return self, ... else return r, ... end
+	end
+
 	function promiselist:add1(promise)
-		return self.inner:add(promise)
+		return selfresult(self, self.inner:insert(promise))
+	end
+
+	function promiselist:delete1(promise)
+		return selfresult(self, self.inner:delete(promise))
 	end
 
 	function promiselist:add(s)
 		for promise in s:gmatch"[^%s]+" do
-			local ok, err = self:add1(promise)
+			local ok, err
+
+			if promise:match"^-." then
+				ok, err = self:delete1(promise:sub(2))
+			else
+				ok, err = self:add1(promise)
+			end
 			if not ok then
 				return nil, err or "?"
 			end
