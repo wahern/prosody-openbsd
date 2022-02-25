@@ -22,6 +22,8 @@ package.
 
 ## Configuration
 
+### Loading mod_unveil
+
 The module `mod_unveil` *should* be loaded as early as possible to ensure
 the process is already sandboxed before any module begins loading state.
 Unfortunately, Prosody loads modules in mostly random order (by iterating a
@@ -33,6 +35,45 @@ code can be `Include`d from `prosody.cfg.lua`.
 ```shell
   $ cp /usr/local/share/examples/prosody/openbsd.cfg.lua /etc/prosody/
   $ echo 'Include "openbsd.cfg.lua"' >> /etc/prosody/prosody.cfg.lua
+```
+
+### pledge Option
+
+String of additional pledge promises, or a boolean feature gate flag.
+Defaults to `true`. `pledge` is a global option only.
+
+```lua
+  -- Example 1
+  pledge = "exec unix" -- add exec and unix pledge(2) promises
+
+  -- Example 2
+  pledge = false -- disable pledge(2) support
+```
+
+### unveil Option
+
+String or table of additional paths to unveil, or a boolean feature gate
+flag. Defaults to `true`. If a string, a multiline string of space-separated
+permission/path pairs, one pair per line. If a table, a list of
+path/permission tuples, each tuple a table with `path` and `permissions`
+keys, or indices `1` and `2`, respectively. If undefined, `permissions`
+defaults to `"r"`. `unveil` is a global option only.
+
+```lua
+  -- Example 1
+  unveil = [[
+    r    /usr/local/lib
+    rwc  /var/cache/prosody
+  ]]
+
+  -- Example 2
+  unveil = {
+    { "/usr/local/lib" },
+    { path = "/var/cache/prosody", permissions = "rwc" },
+  }
+
+  -- Example 3
+  unveil = false -- disable unveil(2) support
 ```
 
 ## License
