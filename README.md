@@ -30,17 +30,27 @@ Unfortunately, Prosody loads modules in mostly random order (by iterating a
 hash--not array--built from `modules_enabled` and other built-in lists).
 Fortunately, code can be executed directly from the configuration file. In
 case future changes are required to ensure an early module loading, this
-code can be `Include`d from `prosody.cfg.lua`.
+code can be `Include`'d from `prosody.cfg.lua`.
 
 ```shell
   $ cp /usr/local/share/examples/prosody/openbsd.cfg.lua /etc/prosody/
   $ echo 'Include "openbsd.cfg.lua"' >> /etc/prosody/prosody.cfg.lua
 ```
 
+`Include`'ing `openbsd.cfg.lua` loads `mod_unveil`, enabling `pledge` and
+`unveil` restrictions by default. In the future it will likely also
+enable by default other OpenBSD integrations.
+
 ### pledge Option
 
 String of additional pledge promises, or a boolean feature gate flag.
 Defaults to `true`. `pledge` is a global option only.
+
+The default set of built-in pledge promises should be sufficient for typical
+installations. `pledge`'d promises are reported in the `info` log at
+startup.
+
+#### Examples
 
 ```lua
   -- Example 1
@@ -58,6 +68,13 @@ permission/path pairs, one pair per line. If a table, a list of
 path/permission tuples, each tuple a table with `path` and `permissions`
 keys, or indices `1` and `2`, respectively. If undefined, `permissions`
 defaults to `"r"`. `unveil` is a global option only.
+
+The default set of unveil paths--including `ssl.key`, `ssl.certificate`,
+`ssl.cafile`, and related paths derived from the configuration--should be
+sufficient for typical installations. `unveil`'d paths are reported in the
+`info` log at startup.
+
+#### Examples
 
 ```lua
   -- Example 1
