@@ -399,7 +399,7 @@ local _UNVEIL_INIT = {
 -- daemonization (presuming we're loaded early enough), then we can drop.
 -- NB: Unlike unveil, subsequent pledges cannot expand capabilities.
 local _PROMISES_SEAL = "stdio rpath wpath cpath inet dns"
-local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc"
+local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc prot_exec"
 
 local unveil_enabled = module:get_option("unveil", true)
 local pledge_enabled = module:get_option("pledge", true)
