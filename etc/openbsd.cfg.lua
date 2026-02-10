@@ -20,7 +20,7 @@
 --   * Handlers are invoked in descending order of priority. See
 --     https://hg.prosody.im/trunk/file/469e4453ed01/util/events.lua#l39
 --
-prosody.events.add_handler("server-starting", function ()
+Lua.prosody.events.add_handler("server-starting", function ()
 	local mod, err = require"core.modulemanager".load("*", "unveil")
 	if not mod then
 		-- bail on load error rather than leave process unguarded
