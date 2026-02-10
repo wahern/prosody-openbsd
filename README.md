@@ -13,8 +13,8 @@ native kqueue support, to improve OpenBSD system integration.
 ## Installation
 
 The Makefile and default compiler flags assume an OpenBSD build host, and
-the default installation paths assume an OpenBSD 7.0 Prosody 0.11.13
-package.
+the default installation paths assume an OpenBSD prosody ports package
+using Lua 5.4.
 
 ```shell
   $ make install
