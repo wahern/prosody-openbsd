@@ -7,8 +7,10 @@
 [unveil(2)](https://man.openbsd.org/unveil.2) to minimize process capabilities
 and filesystem visibility.
 
-In the future prosody-openbsd may include additional modules, such as for
-native kqueue support, to improve OpenBSD system integration.
+The default set of pledge promises and configuration-derived unveil paths
+should suffice for typical Prosody installations from OpenBSD ports.
+Bindings to ktrace(2) are included to assist with determining additional
+promises and paths to supplement the defaults.
 
 ## Installation
 
@@ -38,8 +40,7 @@ code can be `Include`'d from `prosody.cfg.lua`.
 ```
 
 `Include`'ing `openbsd.cfg.lua` loads `mod_unveil`, enabling `pledge` and
-`unveil` restrictions by default. In the future it will likely also
-enable by default other OpenBSD integrations.
+`unveil` restrictions by default.
 
 ### pledge Option
 
@@ -62,12 +63,10 @@ startup.
 
 ### unveil Option
 
-String or table of additional paths to unveil, or a boolean feature gate
-flag. Defaults to `true`. If a string, a multiline string of space-separated
-permission/path pairs, one pair per line. If a table, a list of
-path/permission tuples, each tuple a table with `path` and `permissions`
-keys, or indices `1` and `2`, respectively. If undefined, `permissions`
-defaults to `"r"`. `unveil` is a global option only.
+Table of additional paths to unveil, or a boolean feature gate flag.
+Defaults to `true`. The table is a list of path/permission tuples, each
+tuple a table with `path` and `permissions` keys. If undefined,
+`permissions` defaults to `"r"`. `unveil` is a global option only.
 
 The default set of unveil paths--including `ssl.key`, `ssl.certificate`,
 `ssl.cafile`, and related paths derived from the configuration--should be
@@ -78,18 +77,12 @@ sufficient for typical installations. `unveil`'d paths are reported in the
 
 ```lua
   -- Example 1
-  unveil = [[
-    r    /usr/local/lib
-    rwc  /var/cache/prosody
-  ]]
-
-  -- Example 2
   unveil = {
     { "/usr/local/lib" },
     { path = "/var/cache/prosody", permissions = "rwc" },
   }
 
-  -- Example 3
+  -- Example 2
   unveil = false -- disable unveil(2) support
 ```
 
