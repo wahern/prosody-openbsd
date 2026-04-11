@@ -26,10 +26,12 @@
 #include <errno.h>  /* errno */
 #include <string.h> /* strerror(3) strlen(3) */
 
-#include <unistd.h> /* getcwd(3) pledge(2) unveil(2) */
+#include <fcntl.h>  /* O_* open(2) openat(2) */
+#include <unistd.h> /* close(2) getcwd(3) pledge(2) unveil(2) */
 
 #include <sys/param.h>  /* MAXCOMLEN */
 #include <sys/ktrace.h> /* ktrace(2) utrace(2) */
+#include <sys/stat.h>   /* S_* */
 
 #include <lua.h>
 #include <lualib.h>
@@ -53,6 +55,7 @@ static const struct {
 	C(KTRFLAG_DESCEND),
 
 	/* ktrace(2) trpoints */
+	C(KTRFAC_MASK),
 	C(KTRFAC_SYSCALL),
 	C(KTRFAC_SYSRET),
 	C(KTRFAC_NAMEI),
@@ -82,6 +85,51 @@ static const struct {
 	/* struct ktr_user */
 	C(KTR_USER_MAXIDLEN),
 	C(KTR_USER_MAXLEN),
+
+	/* open flags */
+	C(O_ACCMODE),
+	C(O_APPEND),
+	C(O_CLOEXEC),
+	C(O_CLOFORK),
+	C(O_CREAT),
+	C(O_DIRECTORY),
+	C(O_DSYNC),
+	C(O_EXCL),
+#ifdef O_EXEC
+	C(O_EXEC),
+#endif
+	C(O_NOCTTY),
+	C(O_NOFOLLOW),
+	C(O_NONBLOCK),
+	C(O_RDONLY),
+	C(O_RDWR),
+	C(O_RSYNC),
+#ifdef O_SEARCH
+	C(O_SEARCH),
+#endif
+	C(O_SYNC),
+	C(O_TRUNC),
+#ifdef O_TTY_INIT
+	C(O_TTY_INIT),
+#endif
+	C(O_WRONLY),
+
+	/* file mode bits */
+	C(S_IRWXU),
+	C(S_IRUSR),
+	C(S_IWUSR),
+	C(S_IXUSR),
+	C(S_IRWXG),
+	C(S_IRGRP),
+	C(S_IWGRP),
+	C(S_IXGRP),
+	C(S_IRWXO),
+	C(S_IROTH),
+	C(S_IWOTH),
+	C(S_IXOTH),
+	C(S_ISUID),
+	C(S_ISGID),
+	C(S_ISVTX),
 };
 
 static int errnoresult(lua_State *L, int error)
@@ -90,6 +138,19 @@ static int errnoresult(lua_State *L, int error)
 	lua_pushstring(L, strerror(error));
 	lua_pushinteger(L, error);
 	return 3;
+}
+
+static int
+Lclose(lua_State *L)
+{
+	int fd = (int)luaL_checkinteger(L, 1);
+
+	if (0 != close(fd)) {
+		return errnoresult(L, errno);
+	}
+
+	lua_pushboolean(L, 1);
+	return 1;
 }
 
 static int
@@ -126,6 +187,39 @@ Lktrace(lua_State *L)
 	}
 
 	lua_pushboolean(L, 1);
+	return 1;
+}
+
+static int
+Lopen(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	int oflags = (int)luaL_checkinteger(L, 2);
+	mode_t mode = (oflags & O_CREAT)? luaL_checkinteger(L, 3) : 0;
+	int fd;
+
+	if (-1 == (fd = open(path, oflags, mode))) {
+		return errnoresult(L, errno);
+	}
+
+	lua_pushinteger(L, fd);
+	return 1;
+}
+
+static int
+Lopenat(lua_State *L)
+{
+	int dirfd = (int)luaL_checkinteger(L, 1);
+	const char *path = luaL_checkstring(L, 2);
+	int oflags = (int)luaL_checkinteger(L, 3);
+	mode_t mode = (oflags & O_CREAT)? luaL_checkinteger(L, 4) : 0;
+	int fd;
+
+	if (-1 == (fd = openat(dirfd, path, oflags, mode))) {
+		return errnoresult(L, errno);
+	}
+
+	lua_pushinteger(L, fd);
 	return 1;
 }
 
@@ -173,8 +267,11 @@ Lutrace(lua_State *L)
 }
 
 static const luaL_Reg exports[] = {
+	{ "close", &Lclose },
 	{ "getcwd", &Lgetcwd },
 	{ "ktrace", &Lktrace },
+	{ "open", &Lopen },
+	{ "openat", &Lopenat },
 	{ "pledge", &Lpledge },
 	{ "unveil", &Lunveil },
 	{ "utrace", &Lutrace },
