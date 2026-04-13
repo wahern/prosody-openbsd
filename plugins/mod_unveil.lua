@@ -273,6 +273,38 @@ local pathlist = {}; do
 		return selfresult(self, self.inner:upsert(path, permissions))
 	end
 
+	local function tpaths(template)
+		return coroutine.wrap(function ()
+			for rpath in template:gmatch"[^;]+" do
+				local path = abspath(rpath)
+				-- find directory with substitution component, if any
+				local subst = path:match"()/[^/]*%?"
+				if subst then
+					path = path:sub(1, subst - 1)
+					if #path > 0 then
+						coroutine.yield(path)
+					else
+						module:log("warn", "skipping %s (path empty after dropping substitution suffix)", rpath)
+					end
+				else
+					coroutine.yield(path)
+				end
+			end
+		end)
+	end
+
+	function pathlist:addtemplate(template, permissions)
+		local lasterr = nil
+		for path in tpaths(template) do
+			local ok, err = self:add(path, permissions)
+			if not ok then
+				lasterr = err
+			end
+		end
+
+		return not lasterr, lasterr
+	end
+
 	function pathlist:delete(path)
 		return selfresult(self, self.inner:delete(abspath(path)))
 	end
@@ -291,49 +323,64 @@ local pathlist = {}; do
 	end
 
 	function pathlist:addlines(s)
+		local lasterr = nil
+
 		for l in s:gmatch"[^\n]+" do
 			if l:match"[^%s]" then
 				local ok, err = self:addline(l)
 				if not ok then
-					return nil, err
+					lasterr = err or "?"
 				end
 			end
 		end
 
-		return self
+		return (not lasterr and self), lasterr
 	end
 
 	function pathlist:additem(item)
 		local err
 
 		if type(item) == "string" then
+			module:log("warn", "DEPRECATED unveil item type (table expected, got string)")
 			return self:addlines(item)
 		elseif type(item) == "table" then
-			local path = item.path or item[1]
+			local path = item.template or item.path or item[1]
 			local permissions = item.permissions or item[2]
 
+			if path and path == item[1] then
+				module:log("warn", "DEPRECATED path field (.path definition expected, got index 1)")
+			end
+			if permissions and permissions == item[2] then
+				module:log("warn", "DEPRECATED permissions field (.permissions definition expected, got index 2)")
+			end
+
 			if type(path) == "string" then
-				return self:add(path, permissions)
+				if item.template then
+					return self:addtemplate(path, permissions)
+				else
+					return self:add(path, permissions)
+				end
 			end
 
 			err = string.format("unveil item missing path")
 		else
-			err = string.format("bad unveil item type (string or table expected, got %s)", type(item))
+			err = string.format("bad unveil item type (table expected, got %s)", type(item))
 		end
 
 		return nil, err or "?"
 	end
 
 	function pathlist:additems(t)
+		local lasterr = nil
+
 		for _, item in ipairs(t) do
 			local ok, err = self:additem(item)
-
 			if not ok then
-				return nil, err or "?"
+				lasterr = err or "?"
 			end
 		end
 
-		return self
+		return (not lasterr and self), lasterr
 	end
 
 	function pathlist.new()
@@ -389,8 +436,19 @@ local promiselist = {}; do
 end
 
 local _UNVEIL_INIT = {
+	-- pre-7.9 stdio promise
+	{ path = "/etc/localtime", permissions = "r" },
+	{ path = "/usr/share/zoneinfo", permissions = "r" },
+	-- pre-7.9 dns pledge
+	{ path = "/etc/hosts", permissions = "r" },
+	{ path = "/etc/resolv.conf", permissions = "r" },
+	{ path = "/etc/services", permissions = "r" },
+	{ path = "/etc/protocols", permissions = "r" },
+
 	{ path = assert(prosody.paths.config), permissions = "r" },
 	{ path = assert(prosody.paths.source), permissions = "r" },
+	{ path = assert(prosody.paths.installer), permissions = "r" },
+	{ template = assert(prosody.paths.plugins), permissions = "r" },
 	{ path = assert(prosody.paths.data), permissions = "rwc" },
 	{ path = "/etc/ssl/cert.pem", permissions = "r" },
 }
@@ -413,16 +471,20 @@ local function init_unveil()
 
 	local unveil_type = type(unveil_enabled)
 	if unveil_type == "string" then
+		module:log("warn", "DEPRECATED unveil configuration type (table expected, got string)")
 		assert(paths:addlines(unveil_enabled))
 	elseif unveil_type == "table" then
 		assert(paths:additems(unveil_enabled))
 	elseif unveil_type ~= "boolean" then
-		error(string.format("bad unveil_enabled type (string or table expected, got %s)", unveil_type))
+		error(string.format("bad unveil configuration type (table expected, got %s)", unveil_type))
 	end
 
 	for path, permissions in paths do
 		module:log("info", "unveiling %s (%s)", path, permissions)
-		assert(openbsd.unveil(path, permissions))
+		local ok, err = openbsd.unveil(path, permissions)
+		if not ok then
+			module:log("error", "failed to unveil %s: %s", path, err)
+		end
 	end
 
 	-- Seal paths early as one of our main concerns is modules
