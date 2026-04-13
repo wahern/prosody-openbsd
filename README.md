@@ -24,7 +24,7 @@ using Lua 5.4.
 
 ## Configuration
 
-### Loading mod_unveil
+### mod_unveil
 
 The module `mod_unveil` *should* be loaded as early as possible to ensure
 the process is already sandboxed before any module begins loading state.
@@ -51,6 +51,9 @@ The default set of built-in pledge promises should be sufficient for typical
 installations. `pledge`'d promises are reported in the `info` log at
 startup.
 
+NB: In the future the pledge component will be split off into a separate
+module, mod_pledge.
+
 #### Examples
 
 ```lua
@@ -65,20 +68,27 @@ startup.
 
 Table of additional paths to unveil, or a boolean feature gate flag.
 Defaults to `true`. The table is a list of path/permission tuples, each
-tuple a table with `path` and `permissions` keys. If undefined,
-`permissions` defaults to `"r"`. `unveil` is a global option only.
+tuple a table with `path` (or `template`) and `permissions` keys. If
+undefined, `permissions` defaults to `"r"`. `unveil` is a global option
+only.
 
 The default set of unveil paths--including `ssl.key`, `ssl.certificate`,
 `ssl.cafile`, and related paths derived from the configuration--should be
 sufficient for typical installations. `unveil`'d paths are reported in the
 `info` log at startup.
 
+The `template` key can be used instead of `path`, in which case the value is
+parsed as a Lua search template, splitting on `;`. If any of the resulting
+paths have a substitution component (e.g. `?.lua`), the substitution
+component and any trailing subdirectories are dropped. For example,
+`/usr/local/share/lua/5.4/?/init.lua` is unveiled as
+`/usr/local/share/lua/5.4`).
+
 #### Examples
 
 ```lua
   -- Example 1
   unveil = {
-    { "/usr/local/lib" },
     { path = "/var/cache/prosody", permissions = "rwc" },
   }
 
@@ -86,9 +96,41 @@ sufficient for typical installations. `unveil`'d paths are reported in the
   unveil = false -- disable unveil(2) support
 ```
 
+### mod_ktrace
+
+To enable, set the `ktrace` prosody configuration option to boolean `true`
+or to a table value. The allowable table keys are:
+
+* tracefile - ktrace(2) output path string. By default a trace is written
+  to `/var/prosody/ktrace-TIMESTAMP-PID.out`
+
+* tracepoints - Space-delimited string list of KTRFAC_* flags (see ktrace(2)).
+  The builtin default set of tracepoints can be referenced as `DEFAULT`.
+  Preceding a tracepoint flag with `-` causes it to be excluded from
+  the set of tracepoints.
+
+* duration - Duration in integer seconds after which tracing is stopped.
+  WARNING: Do not use if pledge is enabled as the call to stop the trace
+  occurs after pledge'ing and will fail, killing the process (unless the
+  error promise is pledged). No pledge promises enable the ktrace
+  capability.
+
+#### Examples
+
+```lua
+  -- Example 1
+  ktrace = true
+
+  -- Example 2
+  ktrace = {
+    tracefile = "/var/prosody/ktrace.out",
+    tracepoints = "DEFAULT -KTRFAC_SYSCALL -KTRFAC_SYSRET",
+  }
+```
+
 ## License
 
-Copyright (c) 2022 William Ahern &lt;william@25thandClement.com&gt;
+Copyright (c) 2022, 2026 William Ahern &lt;william@25thandClement.com&gt;
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to
