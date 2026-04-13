@@ -1,7 +1,7 @@
 -- =====================================================================
 -- mod_unveil.lua - Prosody OpenBSD sandboxing module
 -- ---------------------------------------------------------------------
--- Copyright (c) 2022 William Ahern
+-- Copyright (c) 2022, 2026 William Ahern
 --
 -- Permission is hereby granted, free of charge, to any person obtaining
 -- a copy of this software and associated documentation files (the
@@ -22,10 +22,13 @@
 -- TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 -- SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 -- ======================================================================
-local configmanager = require"core.configmanager"
-local openbsd = require"util.openbsd"
+local configmanager = require"prosody.core.configmanager"
+local openbsd = require"prosody.util.openbsd"
 
 module:set_global()
+-- Ensure ktrace is loaded, if at all, before us in case it needs to create
+-- a trace file at a path which won't be unveil'd.
+module:depends("ktrace", true)
 
 -- abspath :: path:string [, basedir:string] -> string
 --
@@ -119,6 +122,9 @@ local function xpwrap(f, msgh)
 	end
 end
 
+-- Map with insertion-order iterator.
+--
+-- TODO: Duplicated in mod_pledge. Put into separate util module?
 local orderedmap = {}; do
 	orderedmap.__index = orderedmap
 
@@ -391,47 +397,16 @@ local pathlist = {}; do
 	end
 end
 
-local promiselist = {}; do
-	promiselist.__index = promiselist
-
-	function promiselist.__call(self, _, previousindex)
-		return self.inner(_, previousindex)
-	end
-
-	local function selfresult(self, r, ...)
-		if r then return self, ... else return r, ... end
-	end
-
-	function promiselist:add1(promise)
-		return selfresult(self, self.inner:insert(promise))
-	end
-
-	function promiselist:delete1(promise)
-		return selfresult(self, self.inner:delete(promise))
-	end
-
-	function promiselist:add(s)
-		for promise in s:gmatch"[^%s]+" do
-			local ok, err
-
-			if promise:match"^-." then
-				ok, err = self:delete1(promise:sub(2))
-			else
-				ok, err = self:add1(promise)
-			end
-			if not ok then
-				return nil, err or "?"
-			end
-		end
-
-		return self
-	end
-
-	function promiselist.new()
-		local self = {
-			inner = orderedmap.new(),
-		}
-		return setmetatable(self, promiselist)
+-- returns true if we can invoke unveil(2) without killing the process
+local function can_unveil()
+	local modulemanager = require"prosody.core.modulemanager"
+	local mod_pledge = modulemanager.get_module("*", "pledge")
+	if not mod_pledge or not mod_pledge.is_pledged() then
+		return true
+	elseif mod_pledge.is_pledged"unveil" or mod_pledge.is_pledged"error" then
+		return true
+	else
+		return false
 	end
 end
 
@@ -453,14 +428,7 @@ local _UNVEIL_INIT = {
 	{ path = "/etc/ssl/cert.pem", permissions = "r" },
 }
 
--- The flock and proc pledges are required initially for mod_posix
--- daemonization (presuming we're loaded early enough), then we can drop.
--- NB: Unlike unveil, subsequent pledges cannot expand capabilities.
-local _PROMISES_SEAL = "stdio rpath wpath cpath inet dns"
-local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc prot_exec"
-
 local unveil_enabled = module:get_option("unveil", true)
-local pledge_enabled = module:get_option("pledge", true)
 
 local function init_unveil()
 	local paths = assert(pathlist.new():additems(_UNVEIL_INIT))
@@ -479,6 +447,10 @@ local function init_unveil()
 		error(string.format("bad unveil configuration type (table expected, got %s)", unveil_type))
 	end
 
+	if not can_unveil() then
+		error("process has already been pledged (try including error or unveil promise)")
+	end
+
 	for path, permissions in paths do
 		module:log("info", "unveiling %s (%s)", path, permissions)
 		local ok, err = openbsd.unveil(path, permissions)
@@ -493,37 +465,6 @@ local function init_unveil()
 	module:log("info", "unveil sealed")
 end
 
-local function init_pledge()
-	local promises = promiselist.new()
-
-	promises:add(_PROMISES_INIT)
-
-	if type(pledge_enabled) == "string" then
-		promises:add(pledge_enabled)
-	end
-
-	local s = table.concat(promises.inner:getlist(), " ")
-	module:log("info", "pledging %s", s)
-	assert(openbsd.pledge(s))
-end
-
-local function seal_pledge()
-	local promises = promiselist.new()
-
-	promises:add(_PROMISES_SEAL)
-
-	if type(pledge_enabled) == "string" then
-		promises:add(pledge_enabled)
-	end
-
-	local s = table.concat(promises.inner:getlist(), " ")
-	module:log("info", "pledging %s", s)
-	assert(openbsd.pledge(s))
-
-	assert(openbsd.pledge())
-	module:log("info", "pledge sealed")
-end
-
 local function on_error(err)
 	module:log("error", "%s", tostring(err))
 
@@ -535,17 +476,11 @@ local init_sandbox = xpwrap(function ()
 	if unveil_enabled then
 		init_unveil()
 	end
-
-	if pledge_enabled then
-		init_pledge()
-	end
-end, on_error)
-
-local seal_sandbox = xpwrap(function()
-	if pledge_enabled then
-		seal_pledge()
-	end
 end, on_error)
 
 init_sandbox()
-module:hook_global("server-started", seal_sandbox, -99)
+
+-- module exports
+function is_enabled()
+	return unveil_enabled
+end

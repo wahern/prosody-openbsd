@@ -33,10 +33,15 @@ Lua.prosody.events.add_handler("server-starting", function ()
 	-- emit after loading mod_ktrace, in case it starts a trace
 	openbsd.utrace"server-starting"
 
-	local mod, err = modulemanager.load("*", "unveil")
-	if not mod then
-		log("error", "unable to load mod_unveil: %s", err or "?")
-		-- bail on load error rather than leave process unguarded
-		os.exit(1)
+	for _, modname in ipairs{
+		"pledge",
+		"unveil",
+	} do
+		local mod, err = modulemanager.load("*", modname)
+		if not mod then
+			log("error", "unable to load mod_%s: %s", modname, err or "?")
+			-- bail on load error rather than leave process unguarded
+			os.exit(1)
+		end
 	end
 end, 99)

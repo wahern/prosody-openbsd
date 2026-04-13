@@ -189,6 +189,20 @@ local function preptracefile(path)
 	end
 end
 
+-- returns true if we can invoke ktrace(2) without killing the process
+local function can_ktrace()
+	local modulemanager = require"prosody.core.modulemanager"
+	local mod_pledge = modulemanager.get_module("*", "pledge")
+	if not mod_pledge or not mod_pledge.is_pledged() then
+		return true
+	elseif mod_pledge.is_pledged"error" then
+		-- ktrace(2) will return ENOSYS rather than SIGKILL
+		return true
+	else
+		return false
+	end
+end
+
 local stop = xpwrap(function ()
 	local tracefile = activetracefile
 
@@ -201,9 +215,11 @@ local stop = xpwrap(function ()
 		activetimer = nil
 	end
 
-	-- FIXME: Skip if we're pledged, otherwise we might kill the
-	-- process. There's no pledge for ktrace, though utrace is always
-	-- allowed.
+	-- Skip if we're pledged, otherwise we might kill the process.
+	-- There's no pledge for ktrace, though utrace is always allowed.
+	if not can_ktrace() then
+		return false, "not stopping trace, process is already pledged"
+	end
 
 	-- Don't need KTRFLAG_DESCEND, trpoints, or PID when using
 	-- KTROP_CLEARFILE. See doktrace in sys/kern/kern_ktrace.c.
@@ -275,6 +291,10 @@ do
 		"config-reloaded",
 		"server-stopping",
 		"server-stopped",
+		-- modules
+		"module-loaded",
+		"module-reloaded",
+		"module-unloaded",
 		-- user sessions
 		-- FIXME: these don't seem to work from a global context
 		"authentication-success",
