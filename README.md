@@ -24,25 +24,29 @@ using Lua 5.4.
 
 ## Configuration
 
-### mod_unveil
+### openbsd.cfg.lua Include
 
-The module `mod_unveil` *should* be loaded as early as possible to ensure
-the process is already sandboxed before any module begins loading state.
-Unfortunately, Prosody loads modules in mostly random order (by iterating a
-hash--not array--built from `modules_enabled` and other built-in lists).
-Fortunately, code can be executed directly from the configuration file. In
-case future changes are required to ensure an early module loading, this
-code can be `Include`'d from `prosody.cfg.lua`.
+The modules `mod_pledge` and `mod_unveil` *should* be loaded as early as
+possible to ensure the process is already sandboxed before any other module
+begins loading state. By default Prosody loads modules in mostly random
+order (by iterating a hash--not array--built from `modules_enabled` and
+other built-in lists), and modules can only force a dependency on
+specifically named modules. Fortunately, code can be executed directly from
+the configuration file. To ensure early module loading, `openbsd.cfg.lua`
+can be `Include`'d from `prosody.cfg.lua`, which will use the Prosody API to
+force-load `mod_pledge`, `mod_unveil`, and `mod_ktrace` before any others.
 
 ```shell
   $ cp /usr/local/share/examples/prosody/openbsd.cfg.lua /etc/prosody/
   $ echo 'Include "openbsd.cfg.lua"' >> /etc/prosody/prosody.cfg.lua
 ```
 
-`Include`'ing `openbsd.cfg.lua` loads `mod_unveil`, enabling `pledge` and
-`unveil` restrictions by default.
+Note that `mod_pledge` and `mod_unveil` are enabled by default once loaded
+unless explicitly disabled by the `pledge` or `unveil` directives,
+respectively. `mod_ktrace` must be explicitly enabled
 
-### pledge Option
+
+### pledge Option (mod_pledge)
 
 String of additional pledge promises, or a boolean feature gate flag.
 Defaults to `true`. `pledge` is a global option only.
@@ -50,9 +54,6 @@ Defaults to `true`. `pledge` is a global option only.
 The default set of built-in pledge promises should be sufficient for typical
 installations. `pledge`'d promises are reported in the `info` log at
 startup.
-
-NB: In the future the pledge component will be split off into a separate
-module, mod_pledge.
 
 #### Examples
 
@@ -64,7 +65,7 @@ module, mod_pledge.
   pledge = false -- disable pledge(2) support
 ```
 
-### unveil Option
+### unveil Option (mod_unveil)
 
 Table of additional paths to unveil, or a boolean feature gate flag.
 Defaults to `true`. The table is a list of path/permission tuples, each
@@ -96,7 +97,7 @@ component and any trailing subdirectories are dropped. For example,
   unveil = false -- disable unveil(2) support
 ```
 
-### mod_ktrace
+### ktrace Option (mod_ktrace)
 
 To enable, set the `ktrace` prosody configuration option to boolean `true`
 or to a table value. The allowable table keys are:
@@ -110,10 +111,21 @@ or to a table value. The allowable table keys are:
   the set of tracepoints.
 
 * duration - Duration in integer seconds after which tracing is stopped.
-  WARNING: Do not use if pledge is enabled as the call to stop the trace
-  occurs after pledge'ing and will fail, killing the process (unless the
-  error promise is pledged). No pledge promises enable the ktrace
-  capability.
+  WARNING: A trace cannot be stopped if the process has already been
+  pledge'd. Duration is only useful when disabling `mod_pledge` as there is
+  no pledge promise for the ktrace capability. If called after pledge'ing,
+  the ktrace(2) syscall will trigger SIGKILL (default), or, if the error
+  promise has been explicitly pledged, fail with ENOSYS. To avoid an abrupt
+  exit with no log message, `mod_ktrace` will check the state of
+  `mod_pledge` before attempting to stop a trace.
+
+Both `mod_pledge` and `mod_unveil` implicitly load `mod_ktrace`,
+`mod_pledge` to ensure a trace can be started before pledge'ing, and
+`mod_unveil` in case a tracefile is specified that is not in a subdirectory
+of an unveil'd, writeable path. Tracing is not enabled by default, but when
+loaded KTRFAC_USER tracepoints records (see utrace(2)) are injected for
+various Prosody events. To prevent loading of `mod_ktrace`, add `ktrace` to
+`modules_disabled` in `prosody.cfg.lua`.
 
 #### Examples
 
