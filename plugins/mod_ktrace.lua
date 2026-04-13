@@ -77,10 +77,11 @@ local function optfield(t, name, def, expected, ...)
 end
 
 local _DEFAULT_TRACEPOINTS = openbsd.KTRFAC_SYSCALL
-		           | openbsd.KTRFAC_NAMEI
-		           | openbsd.KTRFAC_PLEDGE
-		           | openbsd.KTRFAC_USER
-		           | openbsd.KTRFAC_INHERIT
+                           | openbsd.KTRFAC_SYSRET
+                           | openbsd.KTRFAC_NAMEI
+                           | openbsd.KTRFAC_PLEDGE
+                           | openbsd.KTRFAC_USER
+                           | openbsd.KTRFAC_INHERIT
 local function totracepoint(s)
 	local minus, name = s:upper():match"^(-?)(.*)"
 	if name == "DEFAULT" then
@@ -265,5 +266,27 @@ do
 		if not ok then
 			module:log("error", "%s", err)
 		end
+	end
+
+	for _, event in pairs{
+		-- server status
+		"server-starting", -- NB: probably missed this event already
+		"server-started",
+		"config-reloaded",
+		"server-stopping",
+		"server-stopped",
+		-- user sessions
+		-- FIXME: these don't seem to work from a global context
+		"authentication-success",
+		"authentication-failure",
+		"resource-bind",
+		"resource-unbind",
+	} do
+		module:hook(event, function ()
+			local ok, err = openbsd.utrace(event)
+			if not ok then
+				module:log("error", "%s: utrace: %s", event, err)
+			end
+		end, 99)
 	end
 end

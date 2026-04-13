@@ -21,8 +21,21 @@
 --     https://hg.prosody.im/trunk/file/469e4453ed01/util/events.lua#l39
 --
 Lua.prosody.events.add_handler("server-starting", function ()
-	local mod, err = require"core.modulemanager".load("*", "unveil")
+	local openbsd = require"prosody.util.openbsd"
+	local log = require"prosody.util.logger".init("openbsd.cfg.lua");
+	local modulemanager = require"prosody.core.modulemanager"
+
+	local mod, err = modulemanager.load("*", "ktrace")
 	if not mod then
+		log("error", "unable to load mod_ktrace: %s", err or "?")
+	end
+
+	-- emit after loading mod_ktrace, in case it starts a trace
+	openbsd.utrace"server-starting"
+
+	local mod, err = modulemanager.load("*", "unveil")
+	if not mod then
+		log("error", "unable to load mod_unveil: %s", err or "?")
 		-- bail on load error rather than leave process unguarded
 		os.exit(1)
 	end
