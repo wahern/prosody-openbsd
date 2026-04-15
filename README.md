@@ -38,12 +38,18 @@ force-load `mod_pledge`, `mod_unveil`, and `mod_ktrace` before any others.
 
 ```shell
   $ cp /usr/local/share/examples/prosody/openbsd.cfg.lua /etc/prosody/
-  $ echo 'Include "openbsd.cfg.lua"' >> /etc/prosody/prosody.cfg.lua
+```
+
+then add an Include directive to the server-wide settings section of
+`/etc/prosody/prosody.cfg.lua`,
+
+```
+  Include "openbsd.cfg.lua"
 ```
 
 Note that `mod_pledge` and `mod_unveil` are enabled by default once loaded
 unless explicitly disabled by the `pledge` or `unveil` directives,
-respectively. `mod_ktrace` must be explicitly enabled
+respectively. `mod_ktrace` must be explicitly enabled.
 
 
 ### pledge Option (mod_pledge)
