@@ -24,6 +24,7 @@
 -- ======================================================================
 local configmanager = require"prosody.core.configmanager"
 local openbsd = require"prosody.util.openbsd"
+local sformat = string.format
 
 module:set_global()
 -- Ensure ktrace is loaded, if at all, before us as there is no pledge
@@ -49,6 +50,7 @@ end
 -- TODO: Duplicated from mod_unveil. Put into separate util module?
 local orderedmap = {}; do
 	orderedmap.__index = orderedmap
+	orderedmap.__name = "ordered map"
 
 	function orderedmap.__call(self, _, previousindex)
 		local list = self:getlist()
@@ -65,6 +67,14 @@ local orderedmap = {}; do
 		if nextentry then
 			return nextentry.k, nextentry.v
 		end
+	end
+
+	function orderedmap.__len(self)
+		return self.n
+	end
+
+	function orderedmap:keys()
+		return next, self.index, nil
 	end
 
 	function orderedmap:getlist()
@@ -116,10 +126,11 @@ local orderedmap = {}; do
 			}
 			self.index[k] = entry
 			self.dirty = true
+			self.n = self.n + 1
 		elseif entry.v ~= v then
-			return nil, string.format("key %q exists with different value", k), entry.v, entry.r
+			return nil, sformat("key %q exists with different value", k), entry.v, entry.r
 		elseif entry.r ~= (rank or entry.r) then
-			return nil, string.format("key %q exists with different rank", k), entry.v, entry.r
+			return nil, sformat("key %q exists with different rank", k), entry.v, entry.r
 		end
 
 		return self
@@ -143,7 +154,7 @@ local orderedmap = {}; do
 		if entry then
 			return update(self, entry, v, rank)
 		else
-			return nil, string.format("key %q does not exist", k)
+			return nil, sformat("key %q does not exist", k)
 		end
 	end
 
@@ -157,8 +168,11 @@ local orderedmap = {}; do
 	end
 
 	function orderedmap:delete(k)
-		self.index[k] = nil
-		self.dirty = true
+		if self.index[k] ~= nil then
+			self.index[k] = nil
+			self.dirty = true
+			self.n = self.n - 1
+		end
 
 		return self
 	end
@@ -178,6 +192,7 @@ local orderedmap = {}; do
 			dirty = false,
 			index = {},
 			list = {},
+			n = 0,
 		}
 		return setmetatable(self, orderedmap)
 	end
@@ -185,46 +200,140 @@ end
 
 local promiselist = {}; do
 	promiselist.__index = promiselist
+	promiselist.__name = "promise list"
 
 	function promiselist.__call(self, _, previousindex)
 		return self.inner(_, previousindex)
+	end
+
+	-- equal if same set of promises
+	function promiselist.__eq(a, b)
+		if #a.inner ~= #b.inner then
+			return false
+		end
+
+		for k in a.inner:keys() do
+			if not b.inner:exists(k) then
+				return false
+			end
+		end
+
+		return true
+	end
+
+	function promiselist.__tostring(self)
+		return table.concat(self.inner:getlist(), " ")
 	end
 
 	local function selfresult(self, r, ...)
 		if r then return self, ... else return r, ... end
 	end
 
-	function promiselist:add1(promise)
+	local function add1(self, promise)
 		return selfresult(self, self.inner:insert(promise))
 	end
 
-	function promiselist:delete1(promise)
+	local function delete1(self, promise)
 		return selfresult(self, self.inner:delete(promise))
 	end
 
-	function promiselist:add(s)
-		for promise in s:gmatch"[^%s]+" do
+	local function gsplit(s)
+		return coroutine.wrap(function ()
+			for promise in s:gmatch"[^%s]+" do
+				if promise:match"^-." then
+					coroutine.yield(promise:sub(2), true, promise)
+				else
+					coroutine.yield(promise, false, promise)
+				end
+			end
+		end)
+	end
+
+	local function delete(self, s, nodefault)
+		local lasterr = nil
+
+		for promise, negated, what in gsplit(s) do
 			local ok, err
 
-			if promise:match"^-." then
-				ok, err = self:delete1(promise:sub(2))
+			if nodefault and promise == "DEFAULT" then
+				ok, err = false, "DEFAULT promise in delete operation"
+			elseif negated then
+				ok, err = false, sformat("negated promise in delete operation (%q expected, got %q)", promise, what)
 			else
-				ok, err = self:add1(promise)
+				ok, err = delete1(self, promise)
 			end
+
 			if not ok then
-				return nil, err or "?"
+				module:log("error", "unable to delete %q promise: %s", what, err or "?")
+				lasterr = err or lasterr or "?"
 			end
 		end
 
-		return self
+		return selfresult(self, not lasterr, lasterr)
+	end
+
+	local function add(self, s, nodefault)
+		local lasterr = nil
+
+		for promise, negated, what in gsplit(s) do
+			local ok, err
+
+			if promise == "DEFAULT" then
+				if nodefault then
+					ok, err = false, "recursive use of DEFAULT promise detected"
+				elseif negated then
+					ok, err = delete(self, self.default, true)
+				else
+					ok, err = add(self, self.default, true)
+				end
+			elseif negated then
+				ok, err = delete1(self, promise)
+			else
+				ok, err = add1(self, promise)
+			end
+
+			if not ok then
+				module:log("error", "unable to add %q promise: %s", what, err or "?")
+				lasterr = err or lasterr or "?"
+			end
+		end
+
+		return selfresult(self, not lasterr, lasterr)
+	end
+
+	function promiselist:add(s1, s2, ...)
+		local ok, err = add(self, s1)
+		if not ok then
+			return false, err or "?"
+		elseif s2 then
+			return self:add(s2, ...)
+		else
+			return self
+		end
+	end
+
+	function promiselist:delete(s1, s2, ...)
+		local ok, err = delete(self, s1)
+		if not ok then
+			return false, err or "?"
+		elseif s2 then
+			return self:delete(s2, ...)
+		else
+			return self
+		end
 	end
 
 	function promiselist:has(promise)
 		return (self.inner:exists(promise))
 	end
 
-	function promiselist.new()
+	function promiselist.type(o)
+		return getmetatable(o) == promiselist and promiselist.__name
+	end
+
+	function promiselist.new(default)
 		local self = {
+			default = default or "",
 			inner = orderedmap.new(),
 		}
 		return setmetatable(self, promiselist)
@@ -238,75 +347,169 @@ end
 local _PROMISES_SEAL = "stdio rpath wpath cpath inet dns"
 local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc prot_exec unveil"
 
-local pledge_enabled = module:get_option("pledge", true)
-local activepromises = nil
+-- see save and restore module methods
+local _STATE = {
+	sealed = false,
+	promised = nil,
+}
 
-local function init_pledge()
-	local promises = promiselist.new()
+local function parsecfg(v)
+	local cfg = {
+		init = nil,
+		seal = nil,
+	}
+	local err
 
-	promises:add(_PROMISES_INIT)
+	if v == true then
+		cfg.init, err = promiselist.new(_PROMISES_INIT):add("DEFAULT")
+		if err then return false, err end
+		cfg.seal, err = promiselist.new(_PROMISES_SEAL):add("DEFAULT")
+		if err then return false, err end
+	elseif v == false then
+		cfg.init = false
+		cfg.seal = false
+	elseif type(v) == "string" then
+		cfg.init, err = promiselist.new(_PROMISES_INIT):add("DEFAULT", v)
+		if err then return false, err end
+		cfg.seal, err = promiselist.new(_PROMISES_SEAL):add("DEFAULT", v)
+		if err then return false, err end
+	elseif type(v) == "table" then
+		local function choose(s, default, what)
+			if s == nil or s == true then
+				return promiselist.new(default):add("DEFAULT")
+			elseif type(s) == "string" then
+				return promiselist.new(default):add(s)
+			elseif s == false then
+				return false
+			else
+				return nil, sformat("bad config %s field (expected string, boolean, or nil, got %s)", what, type(s))
+			end
+		end
+		local r
 
-	if type(pledge_enabled) == "string" then
-		promises:add(pledge_enabled)
+		cfg.init, err = choose(v.init, _PROMISES_INIT, ".init")
+		if err then return false, err end
+		cfg.seal, err = choose(v.seal, _PROMISES_SEAL, ".seal")
+		if err then return false, err end
+	elseif type(v) ~= "boolean" then
+		return false, sformat("bad config type (expected boolean, string or table, got %s)", type(v))
 	end
 
-	local s = table.concat(promises.inner:getlist(), " ")
-	module:log("info", "pledging %s", s)
-	assert(openbsd.pledge(s))
-	activepromises = promises
+	assert(cfg.init == false or promiselist.type(cfg.init))
+	assert(cfg.seal == false or promiselist.type(cfg.seal))
+
+	return cfg
 end
 
-local function seal_pledge()
-	local promises = promiselist.new()
+local _CFG = nil
+local function getcfg()
+	if not _CFG then
+		_CFG = assert(parsecfg(module:get_option("pledge", true)))
+	end
+	return _CFG
+end
 
-	promises:add(_PROMISES_SEAL)
-
-	if type(pledge_enabled) == "string" then
-		promises:add(pledge_enabled)
+local function init_pledge(optcfg)
+	local cfg = assert(optcfg or getcfg())
+	if not cfg.init then
+		module:log("info", "skipping initial pledge (disabled)")
+		return true
 	end
 
-	local s = table.concat(promises.inner:getlist(), " ")
+	local s = tostring(cfg.init)
 	module:log("info", "pledging %s", s)
 	assert(openbsd.pledge(s))
-	activepromises = promises
+	_STATE.promised = cfg.init
+
+	return true
+end
+
+local function seal_pledge(optcfg)
+	local cfg = assert(optcfg or getcfg())
+	if not cfg.seal then
+		module:log("info", "skipping pledge sealing (disabled)")
+		return true
+	end
+
+	local s = tostring(cfg.seal)
+	module:log("info", "pledging %s", s)
+	assert(openbsd.pledge(s))
+	_STATE.promised = cfg.seal
 
 	assert(openbsd.pledge())
+	_STATE.sealed = true
 	module:log("info", "pledge sealed")
+
+	return true
 end
 
-local function on_error(err)
+local function die(err)
 	module:log("error", "%s", tostring(err))
-
 	-- bail on load error rather than leave process unguarded
 	os.exit(1)
 end
 
-local init_sandbox = xpwrap(function ()
-	if pledge_enabled then
-		init_pledge()
-	end
-end, on_error)
-
-local seal_sandbox = xpwrap(function()
-	if pledge_enabled then
-		seal_pledge()
-	end
-end, on_error)
-
-init_sandbox()
-module:hook_global("server-started", seal_sandbox, -99)
-
 -- module exports
-function is_enabled()
-	return pledge_enabled
+local loaded = false
+function load()
+	if module.reloading or loaded then
+		return
+	end
+
+	xpwrap(function ()
+		assert(init_pledge())
+	end, die)()
+
+	loaded = true
+
+	module:hook_global("server-started", xpwrap(function ()
+		assert(seal_pledge())
+	end, die), -99)
+end
+
+function save()
+	local cfg = assert(getcfg())
+	-- save promiselists as strings so code references don't persist
+	return {
+		init = cfg.init and tostring(cfg.init) or false,
+		seal = cfg.seal and tostring(cfg.seal) or false,
+		sealed = _STATE.sealed,
+		promised = _STATE.promised and tostring(_STATE.promised) or nil,
+	}
+end
+
+function restore(prior)
+	assert(prior)
+
+	local cfg = assert(getcfg())
+	local prior_init = prior.init and assert(promiselist.new():add(prior.init)) or false
+	local prior_seal = prior.seal and assert(promiselist.new():add(prior.seal)) or false
+	if prior_init ~= cfg.init or prior_seal ~= cfg.seal then
+		module:log("warn", "modified configurations cannot be applied across reloads")
+	end
+
+	_STATE = {
+		sealed = prior.sealed,
+		promised = prior.promised and assert(promiselist.new():add(prior.promised)) or nil,
+	}
+end
+
+function unload()
+	module:log("error", "unloading not supported (cannot reset or restore process state)")
 end
 
 function is_pledged(promise)
-	if not activepromises then
+	if not _STATE.promised then
 		return false
 	elseif not promise then
 		return true
 	else
-		return (activepromises:has(promise))
+		return (_STATE.promised:has(promise))
 	end
 end
+
+-- If loaded by openbsd.cfg.lua, we must call our load handler ourselves as
+-- we might not be listed in modules_enabled, and even if we are we want to
+-- sandbox as early as possible rather than in the random order Prosody
+-- loads modules (see openbsd.cfg.lua).
+load()
