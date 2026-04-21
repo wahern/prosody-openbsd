@@ -115,6 +115,14 @@ static const struct {
 	C(O_WRONLY),
 
 	/* file mode bits */
+	C(S_IFMT),
+	C(S_IFBLK),
+	C(S_IFCHR),
+	C(S_IFIFO),
+	C(S_IFREG),
+	C(S_IFDIR),
+	C(S_IFLNK),
+	C(S_IFSOCK),
 	C(S_IRWXU),
 	C(S_IRUSR),
 	C(S_IWUSR),
@@ -191,6 +199,52 @@ Lktrace(lua_State *L)
 }
 
 static int
+Lgetegid(lua_State *L)
+{
+	lua_pushinteger(L, getegid());
+	return 1;
+}
+
+static int
+Lgeteuid(lua_State *L)
+{
+	lua_pushinteger(L, geteuid());
+	return 1;
+}
+
+static int
+Lgetgid(lua_State *L)
+{
+	lua_pushinteger(L, getgid());
+	return 1;
+}
+
+static int
+Lgetgroups(lua_State *L)
+{
+	gid_t groups[NGROUPS_MAX];
+	int n;
+
+	if ((n = getgroups(sizeof groups / sizeof *groups, groups)) < 0) {
+		return errnoresult(L, errno);
+	}
+
+	lua_createtable(L, n, 0);
+	for (int i = 0; i < n; i++) {
+		lua_pushinteger(L, groups[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+	return 1;
+}
+
+static int
+Lgetuid(lua_State *L)
+{
+	lua_pushinteger(L, getuid());
+	return 1;
+}
+
+static int
 Lopen(lua_State *L)
 {
 	const char *path = luaL_checkstring(L, 1);
@@ -237,6 +291,70 @@ Lpledge(lua_State *L)
 	return 1;
 }
 
+static inline double
+ts2f(struct timespec ts) {
+	return ts.tv_sec + (ts.tv_nsec / 1000000000.0);
+}
+
+static void
+pushstat(lua_State *L, const struct stat *st)
+{
+	lua_newtable(L);
+
+	lua_pushinteger(L, st->st_dev);
+	lua_setfield(L, -2, "st_dev");
+
+	lua_pushinteger(L, st->st_ino);
+	lua_setfield(L, -2, "st_ino");
+
+	lua_pushinteger(L, st->st_mode);
+	lua_setfield(L, -2, "st_mode");
+
+	lua_pushinteger(L, st->st_nlink);
+	lua_setfield(L, -2, "st_nlink");
+
+	lua_pushinteger(L, st->st_uid);
+	lua_setfield(L, -2, "st_uid");
+
+	lua_pushinteger(L, st->st_gid);
+	lua_setfield(L, -2, "st_gid");
+
+	lua_pushinteger(L, st->st_rdev);
+	lua_setfield(L, -2, "st_rdev");
+
+	lua_pushinteger(L, st->st_size);
+	lua_setfield(L, -2, "st_size");
+
+	lua_pushnumber(L, ts2f(st->st_atim));
+	lua_setfield(L, -2, "st_atim");
+
+	lua_pushnumber(L, ts2f(st->st_mtim));
+	lua_setfield(L, -2, "st_mtim");
+
+	lua_pushnumber(L, ts2f(st->st_ctim));
+	lua_setfield(L, -2, "st_ctim");
+
+	lua_pushinteger(L, st->st_blksize);
+	lua_setfield(L, -2, "st_blksize");
+
+	lua_pushinteger(L, st->st_blocks);
+	lua_setfield(L, -2, "st_blocks");
+}
+
+static int
+Lstat(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	struct stat st = { 0 };
+
+	if (0 != stat(path, &st)) {
+		return errnoresult(L, errno);
+	}
+
+	pushstat(L, &st);
+	return 1;
+}
+
 static int
 Lunveil(lua_State *L)
 {
@@ -269,10 +387,16 @@ Lutrace(lua_State *L)
 static const luaL_Reg exports[] = {
 	{ "close", &Lclose },
 	{ "getcwd", &Lgetcwd },
+	{ "getegid", &Lgetegid },
+	{ "geteuid", &Lgeteuid },
+	{ "getgid", &Lgetgid },
+	{ "getgroups", &Lgetgroups },
+	{ "getuid", &Lgetuid },
 	{ "ktrace", &Lktrace },
 	{ "open", &Lopen },
 	{ "openat", &Lopenat },
 	{ "pledge", &Lpledge },
+	{ "stat", &Lstat },
 	{ "unveil", &Lunveil },
 	{ "utrace", &Lutrace },
 	{ NULL, NULL }

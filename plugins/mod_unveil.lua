@@ -272,6 +272,16 @@ local pathlist = {}; do
 		if r then return self, ... else return r, ... end
 	end
 
+	function pathlist:wpaths()
+		return coroutine.wrap(function ()
+			for path, permissions in self do
+				if permissions:match"w" then
+					coroutine.yield(path, permissions)
+				end
+			end
+		end)
+	end
+
 	function pathlist:add(path, permissions)
 		path = abspath(path)
 		permissions = permissions or "r"
@@ -397,6 +407,107 @@ local pathlist = {}; do
 	end
 end
 
+local function check_install(paths)
+	-- all paths should have already been canonicalized with abspath
+	local function issubdir(dir, path)
+		if #path > #dir and dir == path:sub(1, #dir) and path:match("^/", #dir + 1) then
+			return true
+		else
+			return false
+		end
+	end
+
+	local statcache = {}
+	local function stat(path)
+		local ent = statcache[path]
+		if not ent then
+			ent = {}
+			ent.st, ent.err = openbsd.stat(path)
+			statcache[path] = ent
+		end
+		return ent.st, ent.err
+	end
+
+	local function isdir(path)
+		local st, err = stat(path)
+		if not st then return nil, err end
+		return openbsd.S_IFDIR == (st.st_mode & openbsd.S_IFMT)
+	end
+
+	local function ismine(path)
+		local st, err = stat(path)
+		if not st then return nil, err end
+
+		local uid = openbsd.getuid()
+		local euid = openbsd.geteuid()
+		return st.st_uid == uid or st.st_uid == euid
+	end
+
+	local function iswritable(path)
+		if ismine(path) then
+			return true
+		end
+
+		local st, err = stat(path)
+		if not st then return nil, err end
+
+		if openbsd.S_IWOTH == (st.st_mode & openbsd.S_IWOTH) then
+			return true
+		end
+
+		if openbsd.S_IWGRP == (st.st_mode & openbsd.S_IWGRP) then
+			local groups, err = openbsd.getgroups()
+			if not groups then return nil, err end
+
+			groups[#groups + 1] = openbsd.getgid()
+			groups[#groups + 1] = openbsd.getegid()
+
+			for _, gid in ipairs(groups) do
+				if st.st_gid == gid then
+					return true
+				end
+			end
+		end
+
+		return false
+	end
+
+	local function issticky(path)
+		local st, err = stat(path)
+		if not st then return nil, err end
+		return openbsd.S_ISVTX == (st.st_mode & openbsd.S_ISVTX)
+	end
+
+	local function exists(path)
+		local st, err = stat(path)
+		if not st then return nil, err end
+		return true
+	end
+
+	for wpath in paths:wpaths() do
+		local st, err = openbsd.stat(wpath)
+		if not st then
+			module:log("error", "unable to stat directory %s: %s", wpath, err or "?")
+		end
+
+		for path, permissions in paths do
+			if issubdir(wpath, path) and not permissions:match"w" then
+				if not isdir(wpath) then
+					module:log("info", "%s missing parent directory (expected directory at %s)", path, wpath)
+				elseif iswritable(wpath) then
+					if ismine(wpath) then
+						module:log("warn", "%s has unsafe parent directory (%s is owned by prosody process, recommend changing owner)", path, wpath)
+					end
+
+					if not issticky(wpath) then
+						module:log("warn", "%s has unsafe parent directory (%s is writable, recommend setting sticky bit)", path, wpath)
+					end
+				end
+			end
+		end
+	end
+end
+
 -- returns true if we can invoke unveil(2) without killing the process
 local function can_unveil()
 	local modulemanager = require"prosody.core.modulemanager"
@@ -450,6 +561,8 @@ local function init_unveil()
 	if not can_unveil() then
 		error("process has already been pledged (try including error or unveil promise)")
 	end
+
+	check_install(paths)
 
 	for path, permissions in paths do
 		module:log("info", "unveiling %s (%s)", path, permissions)
