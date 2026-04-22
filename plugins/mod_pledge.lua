@@ -349,6 +349,7 @@ local _PROMISES_INIT = _PROMISES_SEAL .. " flock proc prot_exec unveil"
 
 -- see save and restore module methods
 local _STATE = {
+	loaded = false,
 	sealed = false,
 	promised = nil,
 }
@@ -450,9 +451,10 @@ local function die(err)
 end
 
 -- module exports
-local loaded = false
-function load()
-	if module.reloading or loaded then
+function module.load()
+	module:log("debug", "running load method")
+
+	if module.reloading or _STATE.loaded then
 		return
 	end
 
@@ -460,14 +462,16 @@ function load()
 		assert(init_pledge())
 	end, die)()
 
-	loaded = true
+	_STATE.loaded = true
 
 	module:hook_global("server-started", xpwrap(function ()
 		assert(seal_pledge())
 	end, die), -99)
 end
 
-function save()
+function module.save()
+	module:log("debug", "running save method")
+
 	local cfg = assert(getcfg())
 	-- save promiselists as strings so code references don't persist
 	return {
@@ -478,7 +482,9 @@ function save()
 	}
 end
 
-function restore(prior)
+function module.restore(prior)
+	module:log("debug", "running restore method")
+
 	assert(prior)
 
 	local cfg = assert(getcfg())
@@ -489,13 +495,18 @@ function restore(prior)
 	end
 
 	_STATE = {
+		loaded = prior.loaded,
 		sealed = prior.sealed,
 		promised = prior.promised and assert(promiselist.new():add(prior.promised)) or nil,
 	}
 end
 
-function unload()
-	module:log("error", "unloading not supported (cannot reset or restore process state)")
+function module.unload()
+	module:log("debug", "running unload method")
+
+	if not module.reloading then
+		module:log("warn", "unloading not supported (cannot reset or restore process state)")
+	end
 end
 
 function is_pledged(promise)
@@ -512,4 +523,4 @@ end
 -- we might not be listed in modules_enabled, and even if we are we want to
 -- sandbox as early as possible rather than in the random order Prosody
 -- loads modules (see openbsd.cfg.lua).
-load()
+module.load()
