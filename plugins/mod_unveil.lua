@@ -720,9 +720,3 @@ function module.unload()
 		module:log("warn", "unloading not supported (cannot reset or restore process state)")
 	end
 end
-
--- If loaded by openbsd.cfg.lua, we must call our load handler ourselves as
--- we might not be listed in modules_enabled, and even if we are we want to
--- sandbox as early as possible rather than in the random order Prosody
--- loads modules (see openbsd.cfg.lua).
-module.load()

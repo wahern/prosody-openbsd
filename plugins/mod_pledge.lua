@@ -518,9 +518,3 @@ function is_pledged(promise)
 		return (_STATE.promised:has(promise))
 	end
 end
-
--- If loaded by openbsd.cfg.lua, we must call our load handler ourselves as
--- we might not be listed in modules_enabled, and even if we are we want to
--- sandbox as early as possible rather than in the random order Prosody
--- loads modules (see openbsd.cfg.lua).
-module.load()
