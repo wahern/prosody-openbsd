@@ -24,6 +24,7 @@
 -- ======================================================================
 local configmanager = require"prosody.core.configmanager"
 local openbsd = require"prosody.util.openbsd"
+local sformat = string.format
 
 module:set_global()
 -- Ensure ktrace is loaded, if at all, before us in case it needs to create
@@ -59,6 +60,23 @@ local function abspath(path, basedir)
 	end
 
 	return "/" .. table.concat(stack, "/")
+end
+
+-- TODO: remove if not yet used
+local function chopname(path)
+	local i, j = path:match"()/[^/]*()$"
+	if not i then
+		return nil
+	elseif i > 1 then
+		return path:sub(1, j - 1)
+	end
+
+	local len = j - i - 1
+	if len > 0 then
+		return "/"
+	else
+		return nil
+	end
 end
 
 -- Enumerate enabled hosts. See core/hostmanager.lua:load_enabled_hosts and
@@ -195,9 +213,9 @@ local orderedmap = {}; do
 			self.index[k] = entry
 			self.dirty = true
 		elseif entry.v ~= v then
-			return nil, string.format("key %q exists with different value", k), entry.v, entry.r
+			return nil, sformat("key %q exists with different value", k), entry.v, entry.r
 		elseif entry.r ~= (rank or entry.r) then
-			return nil, string.format("key %q exists with different rank", k), entry.v, entry.r
+			return nil, sformat("key %q exists with different rank", k), entry.v, entry.r
 		end
 
 		return self
@@ -221,7 +239,7 @@ local orderedmap = {}; do
 		if entry then
 			return update(self, entry, v, rank)
 		else
-			return nil, string.format("key %q does not exist", k)
+			return nil, sformat("key %q does not exist", k)
 		end
 	end
 
@@ -335,7 +353,7 @@ local pathlist = {}; do
 			end
 		end
 
-		return nil, string.format("malformed unveil line directive %q", l)
+		return nil, sformat("malformed unveil line directive %q", l)
 	end
 
 	function pathlist:addlines(s)
@@ -378,9 +396,9 @@ local pathlist = {}; do
 				end
 			end
 
-			err = string.format("unveil item missing path")
+			err = sformat("unveil item missing path")
 		else
-			err = string.format("bad unveil item type (table expected, got %s)", type(item))
+			err = sformat("bad unveil item type (table expected, got %s)", type(item))
 		end
 
 		return nil, err or "?"
@@ -502,6 +520,13 @@ local function check_install(paths)
 					if not issticky(wpath) then
 						module:log("warn", "%s has unsafe parent directory (%s is writable, recommend setting sticky bit)", path, wpath)
 					end
+
+					-- find immediate child of wpath and test for existence
+					local slash = path:match("()/", #wpath + 2)
+					local cpath = slash and path:sub(1, slash) or path
+					if not exists(cpath) then
+						module:log("warn", "%s has unsafe parent directory (%s is writable, recommend creating %s)", path, wpath, cpath)
+					end
 				end
 			end
 		end
@@ -539,36 +564,102 @@ local _UNVEIL_INIT = {
 	{ path = "/etc/ssl/cert.pem", permissions = "r" },
 }
 
-local unveil_enabled = module:get_option("unveil", true)
+local _STATE = {
+	loaded = false,
+	unveiled = nil,
+}
 
-local function init_unveil()
-	local paths = assert(pathlist.new():additems(_UNVEIL_INIT))
+local function parsecfg(v)
+	local cfg = {
+		enabled = v ~= false,
+		paths = pathlist.new(),
+		exitonerror = true,
+		warnings = true,
+	}
+	local ok, err, lasterr
+
+	ok, err = cfg.paths:additems(_UNVEIL_INIT)
+	if not ok then lasterr = err or "?" end
 
 	for path in ssl_paths() do
-		assert(paths:add(path, "r"))
+		ok, err = cfg.paths:add(path, "r")
+		if not ok then lasterr = err or "?" end
 	end
 
-	local unveil_type = type(unveil_enabled)
-	if unveil_type == "string" then
+	local what = type(v)
+	if what == "string" then
 		module:log("warn", "DEPRECATED unveil configuration type (table expected, got string)")
-		assert(paths:addlines(unveil_enabled))
-	elseif unveil_type == "table" then
-		assert(paths:additems(unveil_enabled))
-	elseif unveil_type ~= "boolean" then
-		error(string.format("bad unveil configuration type (table expected, got %s)", unveil_type))
+		ok, err = cfg.paths:addlines(v)
+		if not ok then lasterr = err or "?" end
+	elseif what == "table" then
+		if v.enabled ~= nil then
+			cfg.enabled = not not v.enabled
+		end
+
+		if v.exitonerror ~= nil then
+			cfg.exitonerror = not not v.exitonerror
+		end
+
+		if v.warnings ~= nil then
+			cfg.warnings = not not v.warnings
+		end
+
+		ok, err = cfg.paths:additems(v)
+		if not ok then lasterr = err or "?" end
+	elseif what ~= "boolean" then
+		module:log("warn", "bad unveil configuration type (table expected, got %s)", what)
+	end
+
+	-- eat error if we're not enabled anyhow
+	if lasterr and not cfg.enabled then
+		module:log("error", "%s", lasterr or "unveil-config-error")
+		lasterr = nil
+	end
+
+	return cfg, lasterr
+end
+
+local _CFG = nil
+local _ERR = nil
+local function getcfg(noerror)
+	if not _CFG then
+		_CFG, _ERR = parsecfg(module:get_option("unveil", true))
+	end
+
+	if _ERR and not noerror then
+		return nil, _ERR
+	end
+
+	return _CFG
+end
+
+local function init_unveil(optcfg)
+	local cfg = optcfg or assert(getcfg())
+
+	if not cfg.enabled then
+		module:log("info", "unveil disabled")
+		return true
 	end
 
 	if not can_unveil() then
 		error("process has already been pledged (try including error or unveil promise)")
 	end
 
-	check_install(paths)
+	if cfg.warnings then
+		local status, err = pcall(check_install, cfg.paths)
+		if status ~= true then
+			module:log("warn", "error checking install: %s", err)
+		end
+	end
 
-	for path, permissions in paths do
+	local unveiled = {}
+	for path, permissions in cfg.paths do
 		module:log("info", "unveiling %s (%s)", path, permissions)
 		local ok, err = openbsd.unveil(path, permissions)
 		if not ok then
 			module:log("error", "failed to unveil %s: %s", path, err)
+		else
+			unveiled[path] = permissions
 		end
 	end
 
@@ -576,24 +667,62 @@ local function init_unveil()
 	-- potentially loading untrusted code, e.g. from /var/prosody.
 	assert(openbsd.unveil())
 	module:log("info", "unveil sealed")
+
+	_STATE.unveiled = unveiled
+
+	return true
 end
 
-local function on_error(err)
-	module:log("error", "%s", tostring(err))
+local function onerror(err)
+	local cfg = getcfg(true)
 
-	-- bail on load error rather than leave process unguarded
-	os.exit(1)
-end
-
-local init_sandbox = xpwrap(function ()
-	if unveil_enabled then
-		init_unveil()
+	if cfg.exitonerror then
+		module:log("error", "%s", tostring(err))
+		os.exit(1)
+	else
+		error(err, 0)
 	end
-end, on_error)
-
-init_sandbox()
+end
 
 -- module exports
-function is_enabled()
-	return unveil_enabled
+function module.load()
+	module:log("debug", "running load method")
+
+	if module.reloading or _STATE.loaded then
+		return
+	end
+
+	xpwrap(function ()
+		assert(init_unveil())
+	end, onerror)()
+
+	_STATE.loaded = true
+
+	return true
 end
+
+function module.save()
+	module:log("debug", "running save method")
+
+	return _STATE
+end
+
+function module.restore(state)
+	module:log("debug", "running restore method")
+
+	_STATE = state
+end
+
+function module.unload()
+	module:log("debug", "running unload method")
+
+	if not module.reloading then
+		module:log("warn", "unloading not supported (cannot reset or restore process state)")
+	end
+end
+
+-- If loaded by openbsd.cfg.lua, we must call our load handler ourselves as
+-- we might not be listed in modules_enabled, and even if we are we want to
+-- sandbox as early as possible rather than in the random order Prosody
+-- loads modules (see openbsd.cfg.lua).
+module.load()
