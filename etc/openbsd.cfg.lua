@@ -6,7 +6,7 @@
 -- possible before any module is loaded which may read data from
 -- /var/prosody. After all modules are loaded and initializations completed,
 -- we can further reduce capabilities and seal the sandbox--accomplished by
--- a server-started hook installed from mod_unveil.
+-- a server-started hook installed from mod_pledge.
 --
 -- NOTES:
 --   * Modules are loaded in a roughly random order by iteration over a
