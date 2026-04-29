@@ -138,6 +138,14 @@ static const struct {
 	C(S_ISUID),
 	C(S_ISGID),
 	C(S_ISVTX),
+
+	/* BSD file flags */
+	C(UF_NODUMP),
+	C(UF_IMMUTABLE),
+	C(UF_APPEND),
+	C(SF_ARCHIVED),
+	C(SF_IMMUTABLE),
+	C(SF_APPEND),
 };
 
 static int errnoresult(lua_State *L, int error)
@@ -183,29 +191,6 @@ Lgetcwd(lua_State *L)
 }
 
 static int
-Lktrace(lua_State *L)
-{
-	const char *tracefile = luaL_checkstring(L, 1);
-	int ops = (int)luaL_checkinteger(L, 2);
-	int trpoints = (int)luaL_checkinteger(L, 3);
-	pid_t pid = (pid_t)luaL_checkinteger(L, 4);
-
-	if (0 != ktrace(tracefile, ops, trpoints, pid)) {
-		return errnoresult(L, errno);
-	}
-
-	lua_pushboolean(L, 1);
-	return 1;
-}
-
-static int
-Lgetegid(lua_State *L)
-{
-	lua_pushinteger(L, getegid());
-	return 1;
-}
-
-static int
 Lgeteuid(lua_State *L)
 {
 	lua_pushinteger(L, geteuid());
@@ -245,49 +230,25 @@ Lgetuid(lua_State *L)
 }
 
 static int
-Lopen(lua_State *L)
+Lktrace(lua_State *L)
 {
-	const char *path = luaL_checkstring(L, 1);
-	int oflags = (int)luaL_checkinteger(L, 2);
-	mode_t mode = (oflags & O_CREAT)? luaL_checkinteger(L, 3) : 0;
-	int fd;
+	const char *tracefile = luaL_checkstring(L, 1);
+	int ops = (int)luaL_checkinteger(L, 2);
+	int trpoints = (int)luaL_checkinteger(L, 3);
+	pid_t pid = (pid_t)luaL_checkinteger(L, 4);
 
-	if (-1 == (fd = open(path, oflags, mode))) {
-		return errnoresult(L, errno);
-	}
-
-	lua_pushinteger(L, fd);
-	return 1;
-}
-
-static int
-Lopenat(lua_State *L)
-{
-	int dirfd = (int)luaL_checkinteger(L, 1);
-	const char *path = luaL_checkstring(L, 2);
-	int oflags = (int)luaL_checkinteger(L, 3);
-	mode_t mode = (oflags & O_CREAT)? luaL_checkinteger(L, 4) : 0;
-	int fd;
-
-	if (-1 == (fd = openat(dirfd, path, oflags, mode))) {
-		return errnoresult(L, errno);
-	}
-
-	lua_pushinteger(L, fd);
-	return 1;
-}
-
-static int
-Lpledge(lua_State *L)
-{
-	const char *promises = luaL_optstring(L, 1, NULL);
-	const char *execpromises = luaL_optstring(L, 2, NULL);
-
-	if (0 != pledge(promises, execpromises)) {
+	if (0 != ktrace(tracefile, ops, trpoints, pid)) {
 		return errnoresult(L, errno);
 	}
 
 	lua_pushboolean(L, 1);
+	return 1;
+}
+
+static int
+Lgetegid(lua_State *L)
+{
+	lua_pushinteger(L, getegid());
 	return 1;
 }
 
@@ -339,6 +300,70 @@ pushstat(lua_State *L, const struct stat *st)
 
 	lua_pushinteger(L, st->st_blocks);
 	lua_setfield(L, -2, "st_blocks");
+
+	lua_pushinteger(L, st->st_flags);
+	lua_setfield(L, -2, "st_flags");
+}
+
+static int
+Llstat(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	struct stat st = { 0 };
+
+	if (0 != lstat(path, &st)) {
+		return errnoresult(L, errno);
+	}
+
+	pushstat(L, &st);
+	return 1;
+}
+
+static int
+Lopen(lua_State *L)
+{
+	const char *path = luaL_checkstring(L, 1);
+	int oflags = (int)luaL_checkinteger(L, 2);
+	mode_t mode = (oflags & O_CREAT)? luaL_checkinteger(L, 3) : 0;
+	int fd;
+
+	if (-1 == (fd = open(path, oflags, mode))) {
+		return errnoresult(L, errno);
+	}
+
+	lua_pushinteger(L, fd);
+	return 1;
+}
+
+static int
+Lopenat(lua_State *L)
+{
+	int dirfd = (int)luaL_checkinteger(L, 1);
+	const char *path = luaL_checkstring(L, 2);
+	int oflags = (int)luaL_checkinteger(L, 3);
+	mode_t mode = (oflags & O_CREAT)? luaL_checkinteger(L, 4) : 0;
+	int fd;
+
+	if (-1 == (fd = openat(dirfd, path, oflags, mode))) {
+		return errnoresult(L, errno);
+	}
+
+	lua_pushinteger(L, fd);
+	return 1;
+}
+
+static int
+Lpledge(lua_State *L)
+{
+	const char *promises = luaL_optstring(L, 1, NULL);
+	const char *execpromises = luaL_optstring(L, 2, NULL);
+
+	if (0 != pledge(promises, execpromises)) {
+		return errnoresult(L, errno);
+	}
+
+	lua_pushboolean(L, 1);
+	return 1;
 }
 
 static int
@@ -393,6 +418,7 @@ static const luaL_Reg exports[] = {
 	{ "getgroups", &Lgetgroups },
 	{ "getuid", &Lgetuid },
 	{ "ktrace", &Lktrace },
+	{ "lstat", &Llstat },
 	{ "open", &Lopen },
 	{ "openat", &Lopenat },
 	{ "pledge", &Lpledge },
