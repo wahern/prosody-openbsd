@@ -48,6 +48,13 @@ static const struct {
 	char name[24];
 	lua_Integer value;
 } constants[] = {
+	/* errno(2) */
+	C(EACCES),
+	C(EISDIR),
+	C(ENOENT),
+	C(ENOTDIR),
+	C(EPERM),
+
 	/* ktrace(2) ops */
 	C(KTROP_SET),
 	C(KTROP_CLEAR),

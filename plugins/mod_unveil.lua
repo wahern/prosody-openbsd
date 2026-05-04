@@ -426,8 +426,61 @@ local pathlist = {}; do
 end
 
 local function check_install(paths)
+	local function getsubtable(t, k)
+		local t1 = t[k]
+		if t1 == nil then
+			t1 = {}
+			t[k] = t1
+		elseif type(t1) ~= "table" then
+			return error(sformat("expected table, got %s", type(t1)), 2)
+		end
+		return t1
+	end
+
+	local pure; do
+		local _nil = {}
+		local function getstash(t, n, k, ...)
+			local k = k == nil and _nil or k
+			if n <= 1 then
+				return t, k
+			else
+				return getstash(getsubtable(t, k), n - 1, ...)
+			end
+		end
+
+		local function getvstash(t, _, ...)
+			local n = select('#', ...)
+			return getstash(t, n + 1, n, ...)
+		end
+
+		pure = function (f)
+			local ar = debug.getinfo(f, "u")
+			local nary = ar.nparams
+			local getstash = ar.isvararg and getvstash or getstash
+			local cache = {}
+
+			return function (...)
+				local stash, k = getstash(cache, nary, ...)
+				local v = stash[k]
+				if not v then
+					v = table.pack(f(...))
+					stash[k] = v
+				end
+				return table.unpack(v, 1, v.n)
+			end
+		end
+	end
+
+	local function bassert(v, ...)
+		if v ~= nil then
+			return v, ...
+		else
+			return error(tostring((...) or "assertion failed!"), 2)
+		end
+	end
+
 	-- all paths should have already been canonicalized with abspath
-	local function issubdir(dir, path)
+	local function issubpath(dir, path)
 		if #path > #dir and dir == path:sub(1, #dir) and path:match("^/", #dir + 1) then
 			return true
 		else
@@ -435,16 +488,13 @@ local function check_install(paths)
 		end
 	end
 
-	local statcache = {}
-	local function stat(path)
-		local ent = statcache[path]
-		if not ent then
-			ent = {}
-			ent.st, ent.err = openbsd.stat(path)
-			statcache[path] = ent
-		end
-		return ent.st, ent.err
-	end
+	local getegid = pure(openbsd.getegid)
+	local geteuid = pure(openbsd.geteuid)
+	local getgid = pure(openbsd.getgid)
+	local getgroups = pure(openbsd.getgroups)
+	local getuid = pure(openbsd.getuid)
+	local lstat = pure(openbsd.lstat)
+	local stat = pure(openbsd.stat)
 
 	local function isdir(path)
 		local st, err = stat(path)
@@ -456,9 +506,31 @@ local function check_install(paths)
 		local st, err = stat(path)
 		if not st then return nil, err end
 
-		local uid = openbsd.getuid()
-		local euid = openbsd.geteuid()
-		return st.st_uid == uid or st.st_uid == euid
+		return st.st_uid == getuid() or st.st_uid == geteuid()
+	end
+
+	local function islimmutable(path)
+		local SF_IMMUTABLE = assert(openbsd.SF_IMMUTABLE)
+		local UF_IMMUTABLE = assert(openbsd.UF_IMMUTABLE)
+
+		if getuid() == 0 or geteuid() == 0 then
+			return false
+		end
+
+		local st, errmsg, errcode = lstat(path)
+		if not st then return nil, errmsg, errcode end
+
+		if SF_IMMUTABLE == (st.st_flags & SF_IMMUTABLE) then
+			return true
+		end
+
+		if UF_IMMUTABLE == (st.st_flags & UF_IMMUTABLE) then
+			if st.st_uid ~= getuid() and st.st_uid ~= geteuid() then
+				return true
+			end
+		end
+
+		return false
 	end
 
 	local function iswritable(path)
@@ -474,11 +546,11 @@ local function check_install(paths)
 		end
 
 		if openbsd.S_IWGRP == (st.st_mode & openbsd.S_IWGRP) then
-			local groups, err = openbsd.getgroups()
+			local groups, err = getgroups()
 			if not groups then return nil, err end
 
-			groups[#groups + 1] = openbsd.getgid()
-			groups[#groups + 1] = openbsd.getegid()
+			groups[#groups + 1] = getgid()
+			groups[#groups + 1] = getegid()
 
 			for _, gid in ipairs(groups) do
 				if st.st_gid == gid then
@@ -496,37 +568,54 @@ local function check_install(paths)
 		return openbsd.S_ISVTX == (st.st_mode & openbsd.S_ISVTX)
 	end
 
-	local function exists(path)
-		local st, err = stat(path)
-		if not st then return nil, err end
-		return true
+	local function lexists(path)
+		local st, errmsg, errcode = lstat(path)
+		if st then
+			return true
+		elseif errcode == openbsd.ENOENT then
+			return false
+		else
+			return nil, errmsg, errcode
+		end
 	end
 
-	for wpath in paths:wpaths() do
-		local st, err = openbsd.stat(wpath)
-		if not st then
-			module:log("error", "unable to stat directory %s: %s", wpath, err or "?")
+	-- TODO: check if any intermediate paths are overwritable
+	local function checksubpath(wpath, path)
+		if not isdir(wpath) then
+			module:log("info", "%s missing parent directory (expected directory at %s)", path, wpath)
+			return
+		elseif not bassert(iswritable(wpath)) then
+			-- if not actually writable subsequent diagnostics would be confusing
+			return
 		end
 
+		-- find immediate child of wpath and test for existence and immutability
+		local slash = path:match("()/", #wpath + 2)
+		local cpath = slash and path:sub(1, slash) or path
+		if not lexists(cpath) then
+			module:log("warn", "%s has unsafe parent directory (%s is writable and %s does not yet exist, recommend creating %s)", path, wpath, cpath, cpath)
+			return
+		elseif islimmutable(cpath) then
+			module:log("debug", "%s has unsafe parent directory, but %s is immutable (skipping further checks)", path, cpath)
+			return
+		end
+
+		if ismine(wpath) then
+			module:log("warn", "%s has unsafe parent directory (%s is owned by prosody process, recommend changing owner or making %s immutable)", path, wpath, cpath)
+		end
+
+		if not issticky(wpath) then
+			module:log("warn", "%s has unsafe parent directory (%s is writable, recommend setting sticky bit or making %s immutable)", path, wpath, cpath)
+		end
+	end
+
+	-- check safety of any non-writable paths under writable ancestor
+	for wpath in paths:wpaths() do
 		for path, permissions in paths do
-			if issubdir(wpath, path) and not permissions:match"w" then
-				if not isdir(wpath) then
-					module:log("info", "%s missing parent directory (expected directory at %s)", path, wpath)
-				elseif iswritable(wpath) then
-					if ismine(wpath) then
-						module:log("warn", "%s has unsafe parent directory (%s is owned by prosody process, recommend changing owner)", path, wpath)
-					end
-
-					if not issticky(wpath) then
-						module:log("warn", "%s has unsafe parent directory (%s is writable, recommend setting sticky bit)", path, wpath)
-					end
-
-					-- find immediate child of wpath and test for existence
-					local slash = path:match("()/", #wpath + 2)
-					local cpath = slash and path:sub(1, slash) or path
-					if not exists(cpath) then
-						module:log("warn", "%s has unsafe parent directory (%s is writable, recommend creating %s)", path, wpath, cpath)
-					end
+			if issubpath(wpath, path) and not permissions:match"w" then
+				local status, errmsg = pcall(checksubpath, wpath, path)
+				if not status then
+					module:log("error", "unable to check safety of %s viz %s: %s", path, wpath, errmsg)
 				end
 			end
 		end
