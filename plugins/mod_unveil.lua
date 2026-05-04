@@ -602,12 +602,19 @@ local function check_install(paths)
 		end
 
 		-- to rename a directory you need write permissions on the
-		-- directory itself in addition to the parent directories,
-		-- because `..' must be modified to point to new parent or
-		-- at least to change ctime
+		-- directory itself in addition to the parent directories as
+		-- the ctime must be updated and, if reparenting, `..'
+		-- modified
 		if cstat:isdir() and not cstat:iswritable() then
-			module:log("debug", "%s has parent directory unveiled as writable, but %s is non-writable directory (should be okay)", path, cpath)
-			return
+			-- however, you don't need write permissions on the
+			-- directory itself to remove it if it's empty
+			--
+			-- TODO: check if empty or remove special casing of
+			-- child directories
+			if false then
+				module:log("debug", "%s has parent directory unveiled as writable, but %s is non-writable, non-empty directory (should be okay)", path, cpath)
+				return
+			end
 		end
 
 		-- otherwise, check if parent directory is sticky
