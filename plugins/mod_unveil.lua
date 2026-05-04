@@ -471,14 +471,6 @@ local function check_install(paths)
 		end
 	end
 
-	local function bassert(v, ...)
-		if v ~= nil then
-			return v, ...
-		else
-			return error(tostring((...) or "assertion failed!"), 2)
-		end
-	end
-
 	-- all paths should have already been canonicalized with abspath
 	local function issubpath(dir, path)
 		if #path > #dir and dir == path:sub(1, #dir) and path:match("^/", #dir + 1) then
@@ -493,120 +485,149 @@ local function check_install(paths)
 	local getgid = pure(openbsd.getgid)
 	local getgroups = pure(openbsd.getgroups)
 	local getuid = pure(openbsd.getuid)
-	local lstat = pure(openbsd.lstat)
-	local stat = pure(openbsd.stat)
 
-	local function isdir(path)
-		local st, err = stat(path)
-		if not st then return nil, err end
-		return openbsd.S_IFDIR == (st.st_mode & openbsd.S_IFMT)
-	end
+	local statmt = {}; do
+		statmt.__index = statmt
+		statmt.__name = "struct stat"
 
-	local function ismine(path)
-		local st, err = stat(path)
-		if not st then return nil, err end
-
-		return st.st_uid == getuid() or st.st_uid == geteuid()
-	end
-
-	local function islimmutable(path)
-		local SF_IMMUTABLE = assert(openbsd.SF_IMMUTABLE)
-		local UF_IMMUTABLE = assert(openbsd.UF_IMMUTABLE)
-
-		if getuid() == 0 or geteuid() == 0 then
-			return false
+		function statmt:__tostring()
+			return self.path
 		end
 
-		local st, errmsg, errcode = lstat(path)
-		if not st then return nil, errmsg, errcode end
-
-		if SF_IMMUTABLE == (st.st_flags & SF_IMMUTABLE) then
-			return true
+		function statmt:isdir()
+			return self:testmode(openbsd.S_IFDIR, openbsd.S_IFMT)
 		end
 
-		if UF_IMMUTABLE == (st.st_flags & UF_IMMUTABLE) then
-			if st.st_uid ~= getuid() and st.st_uid ~= geteuid() then
+		function statmt:isimmutable()
+			if getuid() == 0 or geteuid() == 0 then
+				return false
+			end
+
+			if self:testmode(openbsd.SF_IMMUTABLE) then
 				return true
 			end
-		end
 
-		return false
-	end
-
-	local function iswritable(path)
-		if ismine(path) then
-			return true
-		end
-
-		local st, err = stat(path)
-		if not st then return nil, err end
-
-		if openbsd.S_IWOTH == (st.st_mode & openbsd.S_IWOTH) then
-			return true
-		end
-
-		if openbsd.S_IWGRP == (st.st_mode & openbsd.S_IWGRP) then
-			local groups, err = getgroups()
-			if not groups then return nil, err end
-
-			groups[#groups + 1] = getgid()
-			groups[#groups + 1] = getegid()
-
-			for _, gid in ipairs(groups) do
-				if st.st_gid == gid then
+			if self:testmode(openbsd.UF_IMMUTABLE) then
+				if not self:ismine() then
 					return true
 				end
 			end
-		end
 
-		return false
-	end
-
-	local function issticky(path)
-		local st, err = stat(path)
-		if not st then return nil, err end
-		return openbsd.S_ISVTX == (st.st_mode & openbsd.S_ISVTX)
-	end
-
-	local function lexists(path)
-		local st, errmsg, errcode = lstat(path)
-		if st then
-			return true
-		elseif errcode == openbsd.ENOENT then
 			return false
-		else
-			return nil, errmsg, errcode
+		end
+
+		function statmt:ismine()
+			return self.st_uid == getuid() or self.st_uid == geteuid()
+		end
+
+		function statmt:issticky()
+			return self:testmode(openbsd.S_ISVTX)
+		end
+
+		function statmt:iswritable()
+			if getuid() == 0 or geteuid() == 0 then
+				return true
+			end
+
+			-- if we own it we can grant ourselves permissions
+			if self:ismine() then
+				return true
+			end
+
+			if self:testmode(openbsd.S_IWOTH) then
+				return true
+			end
+
+			if self:testmode(openbsd.S_IWGRP) then
+				local groups, err = getgroups()
+				if not groups then return nil, err end
+
+				groups[#groups + 1] = getgid()
+				groups[#groups + 1] = getegid()
+
+				for _, gid in ipairs(groups) do
+					if self.st_gid == gid then
+						return true
+					end
+				end
+			end
+
+			return false
+		end
+
+		function statmt:testmode(what, mask)
+			return what == (self.st_mode & (mask or what))
+		end
+
+		function statmt.bless(st, path)
+			st.path = path or error("expected path", 2)
+			return setmetatable(st, statmt)
 		end
 	end
+
+	local lstat = pure(function (path)
+		local st, err, code = openbsd.lstat(path)
+		if not st then return nil, err, code end
+		return statmt.bless(st, path)
+	end)
+
+	local stat = pure(function (path)
+		local st, err, code = openbsd.stat(path)
+		if not st then return nil, err, code end
+		return statmt.bless(st, path)
+	end)
 
 	-- TODO: check if any intermediate paths are overwritable
+	-- TODO: better error and diagnostic messages
 	local function checksubpath(wpath, path)
-		if not isdir(wpath) then
+		local wstat, err, code = stat(wpath)
+		if not wstat or not wstat:isdir() then
 			module:log("info", "%s missing parent directory (expected directory at %s)", path, wpath)
 			return
-		elseif not bassert(iswritable(wpath)) then
-			-- if not actually writable subsequent diagnostics would be confusing
+		elseif not wstat:iswritable() then
+			module:log("debug", "%s has parent directory unveiled as writable, but %s is not actually writable (should be okay)", path, wpath)
 			return
 		end
 
 		-- find immediate child of wpath and test for existence and immutability
 		local slash = path:match("()/", #wpath + 2)
 		local cpath = slash and path:sub(1, slash) or path
-		if not lexists(cpath) then
+		local cstat, err, code = lstat(cpath) -- NB: lstat deliberate
+		if not cstat then
 			module:log("warn", "%s has unsafe parent directory (%s is writable and %s does not yet exist, recommend creating %s)", path, wpath, cpath, cpath)
 			return
-		elseif islimmutable(cpath) then
-			module:log("debug", "%s has unsafe parent directory, but %s is immutable (skipping further checks)", path, cpath)
+		elseif cstat:isimmutable() then
+			module:log("debug", "%s has parent directory unveiled as writable, but %s is immutable (should be okay)", path, cpath)
 			return
 		end
 
-		if ismine(wpath) then
-			module:log("warn", "%s has unsafe parent directory (%s is owned by prosody process, recommend changing owner or making %s immutable)", path, wpath, cpath)
+		-- to rename a directory you need write permissions on the
+		-- directory itself in addition to the parent directories,
+		-- because `..' must be modified to point to new parent or
+		-- at least to change ctime
+		if cstat:isdir() and not cstat:iswritable() then
+			module:log("debug", "%s has parent directory unveiled as writable, but %s is non-writable directory (should be okay)", path, cpath)
+			return
 		end
 
-		if not issticky(wpath) then
-			module:log("warn", "%s has unsafe parent directory (%s is writable, recommend setting sticky bit or making %s immutable)", path, wpath, cpath)
+		-- otherwise, check if parent directory is sticky
+		if not wstat:ismine() and wstat:issticky() then
+			module:log("debug", "%s has parent directory unveiled as writable, but %s is sticky (should be okay)", path, wpath)
+			return
 		end
+
+		local warned = false
+		if wstat:ismine() then
+			module:log("warn", "%s has unsafe parent directory (%s is owned by prosody process, recommend changing owner or making %s immutable)", path, wpath, cpath)
+			warned = true
+		end
+
+		if not wstat:issticky() then
+			module:log("warn", "%s has unsafe parent directory (%s is writable, recommend setting sticky bit or making %s immutable)", path, wpath, cpath)
+			warned = true
+		end
+
+		assert(warned, "missing diagnostic for unsafe parent directory")
 	end
 
 	-- check safety of any non-writable paths under writable ancestor
