@@ -295,12 +295,6 @@ do
 		"module-loaded",
 		"module-reloaded",
 		"module-unloaded",
-		-- user sessions
-		-- FIXME: these don't seem to work from a global context
-		"authentication-success",
-		"authentication-failure",
-		"resource-bind",
-		"resource-unbind",
 	} do
 		module:hook(event, function ()
 			local ok, err = openbsd.utrace(event)
