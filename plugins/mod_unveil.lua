@@ -691,7 +691,7 @@ local function parsecfg(v)
 		enabled = v ~= false,
 		paths = pathlist.new(),
 		exitonerror = true,
-		warnings = true,
+		warnings = false,
 	}
 	local ok, err, lasterr
 
